@@ -18,13 +18,17 @@ from widget_app import config
 
 
 class FakeKeyring:
-    """内存 keyring 替身：记录 set/get/delete 调用。"""
+    """内存 keyring 替身：记录 set/get/delete 调用；fail_read_keys 里的键
+    get_password 永远返回 None（模拟写后读校验失败）。"""
 
     def __init__(self):
         self.store = {}
         self.deleted = []
+        self.fail_read_keys = set()
 
     def get_password(self, service, key):
+        if key in self.fail_read_keys:
+            return None
         return self.store.get(key)
 
     def set_password(self, service, key, value):
@@ -87,8 +91,9 @@ class TestCredentialScope(unittest.TestCase):
         )
 
 
-class TestTokenBucketMigration(unittest.TestCase):
-    """旧版单 token 字段同源迁移到作用域分桶。"""
+class TestTokenKeyringMigration(unittest.TestCase):
+    """会话 token 迁入凭据管理器：先写入、验证可读，才从 config.json 清除；
+    验证失败回滚并保留旧值。跨服务器/用户名作用域隔离不变。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="kqw-config-test-")
@@ -96,6 +101,10 @@ class TestTokenBucketMigration(unittest.TestCase):
         config.CONFIG_DIR = Path(self.tmp.name)
         self._old_path = config.CONFIG_PATH
         config.CONFIG_PATH = config.CONFIG_DIR / "config.json"
+        self.fake = FakeKeyring()
+        self._keyring_patch = patch.object(config, "keyring", self.fake, create=True)
+        self._keyring_patch.start()
+        self.addCleanup(self._keyring_patch.stop)
 
     def tearDown(self):
         config.CONFIG_DIR = self._old_dir
@@ -105,59 +114,76 @@ class TestTokenBucketMigration(unittest.TestCase):
     def _write(self, payload):
         config.CONFIG_PATH.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    def test_legacy_token_migrates_to_same_origin_bucket(self):
+    def _read(self):
+        return json.loads(config.CONFIG_PATH.read_text(encoding="utf-8"))
+
+    def test_legacy_token_field_migrates_into_keyring(self):
         self._write({
             "server_url": "http://10.0.0.100:4188",
             "username": "admin",
             "token": "tok-old",
         })
         cfg = config.load_config()
+        self.assertTrue(config.migrate_tokens_to_keyring(cfg))
+        # 凭据管理器里按作用域可读
         self.assertEqual(
-            cfg["tokens"]["http://10.0.0.100:4188|admin"], "tok-old"
+            self.fake.store["http://10.0.0.100:4188|admin"], "tok-old"
         )
-        self.assertNotIn("token", cfg)
+        # 迁移成功后 save：config.json 不再含 token 字段
+        config.save_config(cfg)
+        self.assertNotIn("token", self._read())
 
-    def test_legacy_token_not_reused_for_other_server(self):
+    def test_v102_buckets_migrate_into_keyring(self):
+        self._write({
+            "server_url": "http://10.0.0.100:4188",
+            "username": "admin",
+            "tokens": {"http://10.0.0.100:4188|admin": "tok-v102"},
+        })
+        cfg = config.load_config()
+        self.assertTrue(config.migrate_tokens_to_keyring(cfg))
+        self.assertEqual(
+            self.fake.store["http://10.0.0.100:4188|admin"], "tok-v102"
+        )
+        config.save_config(cfg)
+        self.assertNotIn("tokens", self._read())
+
+    def test_verify_failure_rolls_back_and_keeps_legacy(self):
         self._write({
             "server_url": "http://10.0.0.100:4188",
             "username": "admin",
             "token": "tok-old",
-            "tokens": {"http://other:4188|admin": "tok-other"},
         })
         cfg = config.load_config()
-        # 同源桶为空才迁移；其他服务器的桶不受影响
-        self.assertEqual(cfg["tokens"]["http://10.0.0.100:4188|admin"], "tok-old")
-        self.assertEqual(cfg["tokens"]["http://other:4188|admin"], "tok-other")
 
-    def test_no_legacy_token_no_bucket_entry(self):
-        self._write({"server_url": "http://s", "username": "u"})
-        cfg = config.load_config()
-        self.assertEqual(cfg["tokens"], {})
+        # 让写后读校验失败：作用域键进入 fail_read_keys（get_password 返回 None）
+        self.fake.fail_read_keys.add("http://10.0.0.100:4188|admin")
+        self.assertFalse(config.migrate_tokens_to_keyring(cfg))
+        # config.json 里的旧值仍在（cfg 内存与磁盘均未清除）
+        self.assertEqual(cfg["token"], "tok-old")
+        self.assertEqual(self._read().get("token"), "tok-old")
 
-    def test_get_and_set_stored_token_roundtrip(self):
-        cfg = {"tokens": {}}
-        self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "")
+    def test_same_scope_overwrite_and_clear(self):
+        cfg = {"token": ""}
         config.set_stored_token(cfg, "http://a", "u", "tok")
+        self.assertEqual(self.fake.store["http://a|u"], "tok")
         self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "tok")
         config.set_stored_token(cfg, "http://a", "u", "")  # 清空会话
+        self.assertNotIn("http://a|u", self.fake.store)
         self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "")
 
-    def test_save_config_persists_token_bucket(self):
-        cfg = {
-            "server_url": "http://a:4188",
-            "username": "admin",
-            "tokens": {"http://a:4188|admin": "tok"},
-        }
-        config.save_config(cfg)
-        reloaded = config.load_config()
-        self.assertEqual(reloaded["tokens"].get("http://a:4188|admin"), "tok")
-
-    def test_same_username_tokens_isolated_by_server(self):
-        cfg = {"tokens": {}}
+    def test_scope_isolation_for_tokens(self):
+        cfg = {"token": ""}
         config.set_stored_token(cfg, "http://a", "u", "tok-a")
         config.set_stored_token(cfg, "http://b", "u", "tok-b")
         self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "tok-a")
         self.assertEqual(config.get_stored_token(cfg, "http://b", "u"), "tok-b")
+
+    def test_legacy_fallback_only_for_same_scope(self):
+        # config.json 里遗留的 token 只对它所属的 server/username 生效
+        self._write({"server_url": "http://10.0.0.100:4188", "username": "admin", "token": "tok-legacy"})
+        cfg = config.load_config()
+        self.assertEqual(config.get_stored_token(cfg, "http://10.0.0.100:4188", "admin"), "tok-legacy")
+        self.assertEqual(config.get_stored_token(cfg, "http://other:4188", "admin"), "")
 
 
 class TestPasswordScoping(unittest.TestCase):

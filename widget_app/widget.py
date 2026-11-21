@@ -198,6 +198,12 @@ class QuotaWidget(QWidget):
     def __init__(self):
         super().__init__()
         self._cfg = config.load_config()
+        try:
+            # 会话 token 迁入凭据管理器（先写后验再清 config.json 旧字段）
+            if config.migrate_tokens_to_keyring(self._cfg):
+                config.save_config(self._cfg)
+        except config.ConfigError:
+            pass  # 迁移失败保留 config.json 旧字段，旧回退路径仍有效
         self._client = None
         self._quota = None
         self._last_error = ""
@@ -532,9 +538,12 @@ class QuotaWidget(QWidget):
         username = self._cfg.get("username") or ""
         token = self._client.token if self._client else ""
         if token and token != config.get_stored_token(self._cfg, server, username):
-            # 401 自动重登录后 token 换新，按凭据作用域落盘避免下次重复登录
-            config.set_stored_token(self._cfg, server, username, token)
-            config.save_config(self._cfg)
+            # 401 自动重登录后 token 换新，按凭据作用域写入凭据管理器
+            try:
+                config.set_stored_token(self._cfg, server, username, token)
+                config.save_config(self._cfg)
+            except config.ConfigError:
+                pass  # 写失败：内存 token 仍可用，本次会话不受影响
         self.update()
 
     def _on_failed(self, message: str):

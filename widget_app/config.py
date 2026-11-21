@@ -41,8 +41,11 @@ DEFAULTS = {
     "window_y": None,
     "snap_edge": "",        # 贴边收起："" | top | bottom | left | right
     "blink_enabled": True,  # 低额度（5h 剩余 <10%）时收起卡闪烁提醒
-    "tokens": {},           # {"scheme://host[:port]|用户名": token}，按凭据作用域分桶
 }
+
+# 会话 token 存 Windows 凭据管理器（与密码同一服务族、独立子键），
+# config.json 不再保存任何 token。作用域键与密码一致。
+KEYRING_TOKEN_SERVICE = KEYRING_SERVICE + "/token"
 
 
 class ConfigError(RuntimeError):
@@ -90,40 +93,93 @@ def load_config() -> dict:
     for k in DEFAULTS:
         if k in raw:
             cfg[k] = raw[k]
-    if not isinstance(cfg.get("tokens"), dict):
-        cfg["tokens"] = {}
-    # 旧版单 token 字段迁移：token 与其 server_url/username 同属一个 config，
-    # 可以确定所属作用域，做同源迁移（不是跨服务器复用）。
-    legacy_token = raw.get("token")
-    if legacy_token and raw.get("username"):
-        scope = credential_scope(cfg["server_url"], cfg["username"])
-        if scope and not cfg["tokens"].get(scope):
-            cfg["tokens"][scope] = legacy_token
-        cfg.pop("token", None)
+    # 旧版遗留（迁移源，migrate_tokens_to_keyring 处理后清除）：
+    # raw["token"] = v1.0.1 及之前的单 token 字段；raw["tokens"] = v1.0.2 的分桶
+    cfg["token"] = raw.get("token") or ""
+    cfg["legacy_tokens"] = raw.get("tokens") or {}
+    if not isinstance(cfg["legacy_tokens"], dict):
+        cfg["legacy_tokens"] = {}
     return cfg
+
+
+def migrate_tokens_to_keyring(cfg: dict) -> bool:
+    """把 config.json 里的会话 token（旧单字段 + v1.0.2 分桶）迁入凭据管理器。
+
+    按「规范化源地址|用户名」作用域写入；每条写入后**先验证可读**，全部通过
+    才从 cfg 清除旧字段（调用方随后 save_config 落盘清除）。任何一步失败都
+    放弃迁移并回滚已写条目——config.json 里仍保留旧值，应用照常工作。
+    返回是否发生了迁移。
+    """
+    moved: list[tuple[str, str]] = []
+    server = cfg.get("server_url") or ""
+    username = cfg.get("username") or ""
+    if cfg.get("token") and username:
+        moved.append((credential_scope(server, username), cfg["token"]))
+    for scope, token in (cfg.get("legacy_tokens") or {}).items():
+        if token and scope:
+            moved.append((scope, token))
+    if not moved or keyring is None:
+        return False
+    written: list[str] = []
+    try:
+        for scope, token in moved:
+            keyring.set_password(KEYRING_TOKEN_SERVICE, scope, token)
+            written.append(scope)
+            if keyring.get_password(KEYRING_TOKEN_SERVICE, scope) != token:
+                raise RuntimeError("写后读校验失败")
+    except Exception:
+        # 回滚已写条目，保留 config.json 里的旧值
+        for scope in written:
+            try:
+                keyring.delete_password(KEYRING_TOKEN_SERVICE, scope)
+            except Exception:
+                pass
+        return False
+    cfg["token"] = ""
+    cfg["legacy_tokens"] = {}
+    return True
 
 
 def save_config(cfg: dict) -> None:
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         payload = {k: cfg.get(k, DEFAULTS.get(k)) for k in DEFAULTS}
-        payload["tokens"] = cfg.get("tokens") or {}
         CONFIG_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
         raise ConfigError(f"写入配置失败：{exc}") from exc
 
 
 def get_stored_token(cfg: dict, server_url: str, username: str) -> str:
-    """读取当前作用域的 token；无会话返回 ""。"""
-    return (cfg.get("tokens") or {}).get(credential_scope(server_url, username), "")
+    """读取当前作用域的会话 token（凭据管理器优先，旧 config.json 字段回退）；
+    无会话返回 ""。"""
+    scope = credential_scope(server_url, username)
+    if keyring is not None:
+        try:
+            token = keyring.get_password(KEYRING_TOKEN_SERVICE, scope)
+            if token:
+                return token
+        except Exception:
+            pass
+    # 旧字段回退仅当其作用域与查询一致（同一 config 内的 server/username）
+    same_scope = credential_scope(cfg.get("server_url") or "", cfg.get("username") or "") == scope
+    if same_scope:
+        return cfg.get("token") or ""
+    return ""
 
 
 def set_stored_token(cfg: dict, server_url: str, username: str, token: str) -> None:
-    tokens = cfg.setdefault("tokens", {})
+    if keyring is None:
+        raise ConfigError("keyring 不可用，无法保存会话 token")
+    scope = credential_scope(server_url, username)
     if token:
-        tokens[credential_scope(server_url, username)] = token
+        keyring.set_password(KEYRING_TOKEN_SERVICE, scope, token)
     else:
-        tokens.pop(credential_scope(server_url, username), None)
+        try:
+            keyring.delete_password(KEYRING_TOKEN_SERVICE, scope)
+        except Exception:
+            pass
+    if cfg.get("token"):
+        cfg["token"] = ""  # 旧字段不再维护
 
 
 # ---- Windows 凭据管理器（密码，键 = 凭据作用域） ----
