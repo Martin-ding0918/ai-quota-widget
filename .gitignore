@@ -1,0 +1,18 @@
+# 运维状态记录：含内网拓扑/部署细节，绝不发布（见本地工作区文档）
+README-STATUS.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 构建与打包产物
+build/
+dist/
+*.spec
+*.exe
+
+# 工具临时文件
+*.log
+Thumbs.db
