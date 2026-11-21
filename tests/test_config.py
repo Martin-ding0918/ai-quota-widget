@@ -142,6 +142,16 @@ class TestTokenBucketMigration(unittest.TestCase):
         config.set_stored_token(cfg, "http://a", "u", "")  # 清空会话
         self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "")
 
+    def test_save_config_persists_token_bucket(self):
+        cfg = {
+            "server_url": "http://a:4188",
+            "username": "admin",
+            "tokens": {"http://a:4188|admin": "tok"},
+        }
+        config.save_config(cfg)
+        reloaded = config.load_config()
+        self.assertEqual(reloaded["tokens"].get("http://a:4188|admin"), "tok")
+
     def test_same_username_tokens_isolated_by_server(self):
         cfg = {"tokens": {}}
         config.set_stored_token(cfg, "http://a", "u", "tok-a")
@@ -184,16 +194,6 @@ class TestPasswordScoping(unittest.TestCase):
         # 切到 server-b：无已存密码 → None（要求重新输入），且读不到 a 的密码
         self.assertIsNone(config.get_password("http://b:4188", "admin"))
         self.assertEqual(config.get_password("http://a:4188", "admin"), "pw-a")  # 切回可用
-
-    def test_save_config_persists_token_bucket(self):
-        cfg = {
-            "server_url": "http://a:4188",
-            "username": "admin",
-            "tokens": {"http://a:4188|admin": "tok"},
-        }
-        config.save_config(cfg)
-        reloaded = config.load_config()
-        self.assertEqual(reloaded["tokens"].get("http://a:4188|admin"), "tok")
 
 
 if __name__ == "__main__":
