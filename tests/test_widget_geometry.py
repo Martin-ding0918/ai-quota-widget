@@ -150,5 +150,60 @@ class TestLineBlink(unittest.TestCase):
         self.assertEqual(self.widget._five_hour_color().rgb(), COLOR_GRAY.rgb())
 
 
+class TestCenterFont(unittest.IsolatedAsyncioTestCase):
+    """环心数字自适应字号：宽文本缩到放进孔径，不变式 = 放得下或已到 6pt 下限。
+
+    注意：必须用真实平台（windows）的字体度量——offscreen 平台缺字体引擎，
+    QFontMetricsF 对 pointSize 不敏感，测出的缩放是假的。
+    """
+
+    async def asyncSetUp(self):
+        os.environ.pop("QT_QPA_PLATFORM", None)  # 强制真实平台才有真字体度量
+        self.app = QApplication.instance() or QApplication([])
+        tmp = Path(tempfile.gettempdir()) / "kqw-cf-config.json"
+        tmp.write_text("{}", encoding="utf-8")
+        self._old_cfg_path = config.CONFIG_PATH
+        config.CONFIG_PATH = tmp
+        self.widget = QuotaWidget()
+
+    async def asyncTearDown(self):
+        config.CONFIG_PATH = self._old_cfg_path
+
+    def test_shrinks_until_text_fits_hole(self):
+        from PySide6.QtGui import QFontMetricsF
+        # 迷你卡内环孔径 ~23px："100%" 10pt 必然放不下 → 必须缩
+        f = self.widget._center_font("100%", 23.0, 10.0)
+        fm = QFontMetricsF(f)
+        self.assertLessEqual(fm.horizontalAdvance("100%"), 23.0)
+        self.assertLess(f.pointSizeF(), 10.0)
+        self.assertGreaterEqual(f.pointSizeF(), 6.0)
+
+    def test_floor_at_six_points_for_absurdly_small_hole(self):
+        from PySide6.QtGui import QFontMetricsF
+        f = self.widget._center_font("100%", 8.0, 10.0)
+        self.assertLessEqual(f.pointSizeF(), 6.5)  # 下限保护：缩到 6pt 附近为止
+
+    def test_roomy_hole_keeps_base_size(self):
+        from PySide6.QtGui import QFontMetricsF
+        # 单字符/面板孔径充足 → 保持基准字号
+        f = self.widget._center_font("—", 34.0, 10.0)
+        self.assertEqual(f.pointSizeF(), 10.0)
+        f2 = self.widget._center_font("82%", 34.0, 10.0)
+        self.assertGreaterEqual(f2.pointSizeF(), 8.0)  # 两位数只是微缩或不变
+
+    def test_fractional_shrink_steps(self):
+        from PySide6.QtGui import QFontMetricsF
+        # 中间孔径：0.5pt 步进平滑缩小，最终放得下
+        f = self.widget._center_font("100%", 27.0, 10.0)
+        fm = QFontMetricsF(f)
+        self.assertLessEqual(fm.horizontalAdvance("100%"), 27.0)
+        self.assertGreaterEqual(f.pointSizeF(), 6.0)
+        self.assertLess(f.pointSizeF(), 10.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
 if __name__ == "__main__":
     unittest.main()

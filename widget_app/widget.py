@@ -44,7 +44,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QCursor, QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QCursor, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -658,9 +658,12 @@ class QuotaWidget(QWidget):
                 p.drawArc(rect, 90 * 16, -arc)
 
         if center_text:
-            p.setPen(QPen(ring_color if remaining is not None else COLOR_GRAY))
-            p.setFont(self._font(center_pt, bold=True))
             text = f"{remaining:.0f}%" if remaining is not None else "—"
+            # 环心数字按孔径自适应字号：宽文本（如 "100%"）超出孔径会压到
+            # 同色弧线上被吞掉（"1" 隐形只剩 "00%"），因此逐步缩小到放得下。
+            hole = 2 * (r - width / 2.0) - 4
+            p.setFont(self._center_font(text, hole, float(center_pt)))
+            p.setPen(QPen(ring_color if remaining is not None else COLOR_GRAY))
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
         if label:
@@ -738,6 +741,20 @@ class QuotaWidget(QWidget):
         f = QFont()
         f.setPointSize(pt)
         f.setBold(bold)
+        return f
+
+    def _center_font(self, text: str, hole: float, base_pt: float = 10.0) -> QFont:
+        """环心数字自适应字号：宽度超过孔径就逐步缩小（下限 6pt），
+        避免 "100%" 这类宽文本压到同色弧线上被吞掉。"""
+        f = QFont()
+        f.setPointSizeF(base_pt)
+        f.setBold(True)
+        fm = QFontMetricsF(f)
+        size = base_pt
+        while size > 6.0 and fm.horizontalAdvance(text) > hole:
+            size = max(6.0, size - 0.5)
+            f.setPointSizeF(size)
+            fm = QFontMetricsF(f)
         return f
 
     # ---- 交互 ----
