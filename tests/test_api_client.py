@@ -43,6 +43,7 @@ class FakeSession:
             "headers": headers or {},
             "json": kw.get("json"),
             "params": kw.get("params"),
+            "allow_redirects": kw.get("allow_redirects"),
         })
         item = self.script.pop(0)
         if isinstance(item, Exception):
@@ -66,6 +67,17 @@ class TestLogin(unittest.TestCase):
         self.assertEqual(call["method"], "POST")
         self.assertEqual(call["url"], "http://test/api/auth/login")
         self.assertEqual(call["json"], {"username": "u", "password": "p"})
+
+    def test_login_and_usage_block_redirects(self):
+        # 登录凭据与 Bearer token 都不能被跨源重定向带走
+        client, sess = make_client([
+            FakeResponse(200, {"token": TOKEN}),
+            FakeResponse(200, [{"service_type": "custom"}]),
+        ])
+        client.login()
+        client.get_usage()
+        for call in sess.calls:
+            self.assertIs(call["allow_redirects"], False, f"{call['url']} 未禁用重定向")
 
     def test_login_invalid_credentials_detail(self):
         client, _ = make_client([FakeResponse(401, {"detail": "用户名或密码错误"})])

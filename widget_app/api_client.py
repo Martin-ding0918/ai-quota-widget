@@ -69,6 +69,8 @@ class OpenUsageClient:
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        # 阻止跟随重定向：登录等请求若被跨源重定向，凭据/token 会被带到第三方
+        kwargs.setdefault("allow_redirects", False)
         try:
             return self._session.request(
                 method, self.base_url + path, headers=headers, timeout=self.timeout, **kwargs

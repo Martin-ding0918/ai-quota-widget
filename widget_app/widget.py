@@ -455,22 +455,20 @@ class QuotaWidget(QWidget):
     # ---- 数据 ----
 
     def _rebuild_client(self):
+        server = self._cfg.get("server_url") or ""
         username = self._cfg.get("username") or ""
-        password = config.get_password(username) if username else None
-        self._client = OpenUsageClient(
-            self._cfg.get("server_url") or "",
-            username,
-            password,
-            token=self._cfg.get("token") or "",
-        )
+        password = config.get_password(server, username) if username else None
+        token = config.get_stored_token(self._cfg, server, username)
+        self._client = OpenUsageClient(server, username, password, token=token)
 
     def has_credentials(self) -> bool:
+        server = self._cfg.get("server_url") or ""
         username = self._cfg.get("username") or ""
         if not username:
             return False
-        if self._cfg.get("token"):
+        if config.get_stored_token(self._cfg, server, username):
             return True
-        return config.get_password(username) is not None
+        return config.get_password(server, username) is not None
 
     def refresh(self, force_service: bool = False):
         """发起一次后台轮询；结果经信号回主线程。
@@ -530,10 +528,12 @@ class QuotaWidget(QWidget):
             self._active_polling = active
             self._poll_timer.setInterval(POLL_ACTIVE_MS if active else POLL_IDLE_MS)
             self._poll_timer.start()  # 按新节奏立即重排下一次
+        server = self._cfg.get("server_url") or ""
+        username = self._cfg.get("username") or ""
         token = self._client.token if self._client else ""
-        if token and token != self._cfg.get("token"):
-            # 401 自动重登录后 token 换新，落盘避免下次启动重复登录
-            self._cfg["token"] = token
+        if token and token != config.get_stored_token(self._cfg, server, username):
+            # 401 自动重登录后 token 换新，按凭据作用域落盘避免下次重复登录
+            config.set_stored_token(self._cfg, server, username, token)
             config.save_config(self._cfg)
         self.update()
 
@@ -838,21 +838,31 @@ class QuotaWidget(QWidget):
         if not server or not username:
             QMessageBox.warning(self, "设置", "服务器地址和用户名不能为空")
             return
+        # 凭据作用域（源地址+用户名）变化时不复用旧凭据：新组合必须重新输入密码
+        session_changed = (
+            config.credential_scope(server, username)
+            != config.credential_scope(self._cfg.get("server_url") or "", self._cfg.get("username") or "")
+        )
         if password:
             try:
-                config.set_password(username, password)
+                config.set_password(server, username, password)
             except config.ConfigError as exc:
                 QMessageBox.critical(self, "保存凭据失败", str(exc))
                 return
+        elif session_changed and config.get_password(server, username) is None:
+            QMessageBox.warning(
+                self, "设置",
+                "服务器或用户名已变更：请输入新组合的密码完成登录（不会复用旧服务器的凭据）",
+            )
+            return
         self._cfg["server_url"] = server
         self._cfg["username"] = username
-        self._cfg["token"] = ""  # 强制重新登录
         try:
             config.save_config(self._cfg)
         except config.ConfigError as exc:
             QMessageBox.warning(self, "保存配置失败", str(exc))
             return
-        self._rebuild_client()
+        self._rebuild_client()  # 新作用域无 token → 强制重新登录
         self._quota = None
         self.update()
         self.refresh()
