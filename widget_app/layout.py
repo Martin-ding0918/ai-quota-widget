@@ -64,10 +64,14 @@ def smoothstep(edge0: float, edge1: float, x: float) -> float:
 
 
 def panel_card_rects(orientation: str):
-    """展开面板中三张服务卡片的矩形，顺序 (kimi, opencode, deepseek)。"""
+    """展开面板中三张服务卡片的矩形，顺序 (kimi, opencode, deepseek)。
+
+    横排：左右边距对称（8/8，与竖排侧边距一致，窗口恰好 512）；
+    竖排：上下边距对称（14/14，三卡列在 572 高度内垂直居中）。
+    """
     if orientation == "vertical":
-        return tuple(QRect(8, 8 + i * (CARD_H + 8), CARD_W, CARD_H) for i in range(3))
-    return tuple(QRect(16 + i * (CARD_W + 8), 10, CARD_W, CARD_H) for i in range(3))
+        return tuple(QRect(8, 14 + i * (CARD_H + 8), CARD_W, CARD_H) for i in range(3))
+    return tuple(QRect(8 + i * (CARD_W + 8), 10, CARD_W, CARD_H) for i in range(3))
 
 
 def mini_cell_rects(orientation: str):
