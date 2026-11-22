@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 
 # path 后缀（有无 usages. 前缀都能匹配）
@@ -46,6 +47,50 @@ class KimiQuota:
     fetched_at: datetime
     stale: bool = False
     service_id: Optional[int] = None
+
+
+@dataclass
+class OpenCodeQuota:
+    """OpenCode 三档（5 小时/每周/每月）剩余百分比与各自重置时间。
+
+    上游 percent_used 是 0–100 的已用百分比（与 Kimi 的 0–1 小数不同），
+    remaining = 100 − clamp(percent_used)。
+    """
+
+    five_hour_remaining: Optional[float]
+    week_remaining: Optional[float]
+    month_remaining: Optional[float]
+    reset_5h: Optional[datetime]
+    reset_week: Optional[datetime]
+    reset_month: Optional[datetime]
+    fetched_at: datetime
+    stale: bool = False
+    service_id: Optional[int] = None
+
+
+@dataclass
+class DeepSeekQuota:
+    """DeepSeek 余额快照。金额用 Decimal（上游是字符串金额，避免浮点误差）；
+    currency 为币种代码（CNY/USD/…），显示符号由调用方映射。"""
+
+    balance: Optional[Decimal]
+    topped_up_balance: Optional[Decimal]
+    granted_balance: Optional[Decimal]
+    currency: str
+    is_available: Optional[bool]
+    fetched_at: datetime
+    stale: bool = False
+    service_id: Optional[int] = None
+
+
+@dataclass
+class UsageSnapshot:
+    """一次 /api/usage 响应中三个目标服务的解析结果与逐服务错误。"""
+
+    kimi: Optional[KimiQuota]
+    opencode: Optional[OpenCodeQuota]
+    deepseek: Optional[DeepSeekQuota]
+    errors: dict
 
 
 # Kimi 的 5 小时限额窗口长度；收起态迷你卡的"满环"基准
@@ -221,7 +266,17 @@ def poll_step(prev_sig, cur_sig, active: bool, quiet_streak: int,
     for prev, cur in zip(prev_sig, cur_sig):
         if (prev is None) != (cur is None):
             changed = True
-        elif prev is not None and cur is not None and abs(cur - prev) > epsilon:
+        elif prev is None and cur is None:
+            continue
+        elif (
+            isinstance(prev, (int, float))
+            and not isinstance(prev, bool)
+            and isinstance(cur, (int, float))
+            and not isinstance(cur, bool)
+        ):
+            if abs(cur - prev) > epsilon:
+                changed = True
+        elif str(prev) != str(cur):
             changed = True
     if changed:
         return (True, 0)
@@ -231,6 +286,42 @@ def poll_step(prev_sig, cur_sig, active: bool, quiet_streak: int,
             return (False, 0)
         return (True, streak)
     return (False, quiet_streak)
+
+
+def _parse_kimi_from_service(svc: dict, now: datetime) -> KimiQuota:
+    result = svc.get("result")
+    if not isinstance(result, dict):
+        result = {}
+    data = result.get("data")
+    fields = data.get("fields") if isinstance(data, dict) else None
+    if not isinstance(fields, list):
+        fields = []
+
+    f5h = _find_field(fields, FIVE_H_USED, _LABEL_FALLBACKS[FIVE_H_USED])
+    fmt = _find_field(fields, MONTH_TOTAL_USED, _LABEL_FALLBACKS[MONTH_TOTAL_USED])
+    fmc = _find_field(fields, MONTH_CODE_USED, _LABEL_FALLBACKS[MONTH_CODE_USED])
+    fr5 = _find_field(fields, FIVE_H_RESET, _LABEL_FALLBACKS[FIVE_H_RESET])
+    frm = _find_field(fields, MONTH_RESET, _LABEL_FALLBACKS[MONTH_RESET])
+
+    fetched_at = now
+    raw_fetched = result.get("fetched_at")
+    if isinstance(raw_fetched, str):
+        parsed = parse_reset_datetime(raw_fetched)
+        if parsed is not None:
+            fetched_at = parsed
+
+    stale = bool(result.get("stale_error")) or str(result.get("status") or "").strip().lower() != "ok"
+
+    return KimiQuota(
+        five_hour_remaining=_remaining_pct(f5h.get("value")) if f5h else None,
+        month_total_remaining=_remaining_pct(fmt.get("value")) if fmt else None,
+        month_code_remaining=_remaining_pct(fmc.get("value")) if fmc else None,
+        reset_5h=parse_reset_datetime(fr5.get("value")) if fr5 else None,
+        reset_month=parse_reset_datetime(frm.get("value")) if frm else None,
+        fetched_at=fetched_at,
+        stale=stale,
+        service_id=_safe_int(svc.get("id")),
+    )
 
 
 def parse_kimi_quota(payload: Any, now: Optional[datetime] = None) -> Optional[KimiQuota]:
@@ -259,7 +350,7 @@ def parse_kimi_quota(payload: Any, now: Optional[datetime] = None) -> Optional[K
         if not isinstance(fields, list) or not fields:
             continue
         if _has_kimi_marker(fields):
-            candidates.append((svc, result, fields))
+            candidates.append(svc)
 
     if not candidates:
         return None
@@ -267,33 +358,158 @@ def parse_kimi_quota(payload: Any, now: Optional[datetime] = None) -> Optional[K
     # 多个 custom 服务命中时，优先名字里带 kimi 的
     chosen = candidates[0]
     for cand in candidates:
-        if "kimi" in str(cand[0].get("name") or "").strip().lower():
+        if "kimi" in str(cand.get("name") or "").strip().lower():
             chosen = cand
             break
-    svc, result, fields = chosen
+    return _parse_kimi_from_service(chosen, now)
 
-    f5h = _find_field(fields, FIVE_H_USED, _LABEL_FALLBACKS[FIVE_H_USED])
-    fmt = _find_field(fields, MONTH_TOTAL_USED, _LABEL_FALLBACKS[MONTH_TOTAL_USED])
-    fmc = _find_field(fields, MONTH_CODE_USED, _LABEL_FALLBACKS[MONTH_CODE_USED])
-    fr5 = _find_field(fields, FIVE_H_RESET, _LABEL_FALLBACKS[FIVE_H_RESET])
-    frm = _find_field(fields, MONTH_RESET, _LABEL_FALLBACKS[MONTH_RESET])
 
-    fetched_at = now
-    raw_fetched = result.get("fetched_at")
-    if isinstance(raw_fetched, str):
-        parsed = parse_reset_datetime(raw_fetched)
-        if parsed is not None:
-            fetched_at = parsed
+def _opencode_remaining(percent_used: Any) -> Optional[float]:
+    """OpenCode 的 percent_used 是 0–100 的**已用**百分比（与 Kimi 的 0–1
+    小数不同）：remaining = 100 − clamp(percent_used)。"""
+    if percent_used is None or isinstance(percent_used, bool):
+        return None
+    try:
+        v = float(percent_used)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return 100.0 - max(0.0, min(100.0, v))
 
+
+def _decimal(value: Any) -> Optional[Decimal]:
+    """宽松转 Decimal（上游金额是字符串）；bool/非法/非有限值返回 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        d = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return d if d.is_finite() else None
+
+
+def parse_opencode_quota(service: dict, now: Optional[datetime] = None) -> OpenCodeQuota:
+    """解析 OpenCode 服务（result.data.five_hour/week/month，每档含
+    percent_used / used / limit / resets_at）。"""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.astimezone()
+    result = service.get("result") if isinstance(service, dict) else None
+    if not isinstance(result, dict):
+        result = {}
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+
+    def tier(name: str):
+        block = data.get(name) if isinstance(data.get(name), dict) else {}
+        return (
+            _opencode_remaining(block.get("percent_used")),
+            parse_reset_datetime(block.get("resets_at")),
+        )
+
+    five_hour = tier("five_hour")
+    week = tier("week")
+    month = tier("month")
     stale = bool(result.get("stale_error")) or str(result.get("status") or "").strip().lower() != "ok"
 
-    return KimiQuota(
-        five_hour_remaining=_remaining_pct(f5h.get("value")) if f5h else None,
-        month_total_remaining=_remaining_pct(fmt.get("value")) if fmt else None,
-        month_code_remaining=_remaining_pct(fmc.get("value")) if fmc else None,
-        reset_5h=parse_reset_datetime(fr5.get("value")) if fr5 else None,
-        reset_month=parse_reset_datetime(frm.get("value")) if frm else None,
-        fetched_at=fetched_at,
+    return OpenCodeQuota(
+        five_hour_remaining=five_hour[0],
+        week_remaining=week[0],
+        month_remaining=month[0],
+        reset_5h=five_hour[1],
+        reset_week=week[1],
+        reset_month=month[1],
+        fetched_at=now,
         stale=stale,
-        service_id=_safe_int(svc.get("id")),
+        service_id=_safe_int(service.get("id")) if isinstance(service, dict) else None,
     )
+
+
+def parse_deepseek_quota(service: dict, now: Optional[datetime] = None) -> DeepSeekQuota:
+    """解析 DeepSeek 服务（result.data.is_available + balance_infos[]，取首条）。"""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.astimezone()
+    result = service.get("result") if isinstance(service, dict) else None
+    if not isinstance(result, dict):
+        result = {}
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    infos = data.get("balance_infos")
+    first = infos[0] if isinstance(infos, list) and infos and isinstance(infos[0], dict) else {}
+
+    is_available = data.get("is_available")
+    if is_available is not None and not isinstance(is_available, bool):
+        is_available = str(is_available).strip().lower() in ("1", "true")
+
+    return DeepSeekQuota(
+        balance=_decimal(first.get("total_balance")),
+        topped_up_balance=_decimal(first.get("topped_up_balance")),
+        granted_balance=_decimal(first.get("granted_balance")),
+        currency=str(first.get("currency") or ""),
+        is_available=is_available,
+        fetched_at=now,
+        stale=bool(result.get("stale_error")) or str(result.get("status") or "").strip().lower() != "ok",
+        service_id=_safe_int(service.get("id")) if isinstance(service, dict) else None,
+    )
+
+
+SERVICE_KEYS = ("kimi", "opencode", "deepseek")
+
+
+def parse_usage_snapshot(payload: Any, now: Optional[datetime] = None) -> UsageSnapshot:
+    """一次 /api/usage 响应解析三个目标服务（按 service_type 准确分类）。
+
+    custom 且带 Kimi 字段标记 → Kimi；opencode → OpenCode；deepseek → DeepSeek；
+    其余（如 9527CODE）忽略。服务端返回 status=error 的服务记入 errors。
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.astimezone()
+    kimi: Optional[KimiQuota] = None
+    opencode: Optional[OpenCodeQuota] = None
+    deepseek: Optional[DeepSeekQuota] = None
+    errors: dict = {}
+    if isinstance(payload, list):
+        for svc in payload:
+            if not isinstance(svc, dict):
+                continue
+            st = str(svc.get("service_type") or "").strip().lower()
+            result = svc.get("result")
+            if isinstance(result, dict) and result.get("status") == "error":
+                errors[st or str(_safe_int(svc.get("id")))] = str(result.get("error") or "未知错误")
+            if st == "opencode" and opencode is None:
+                opencode = parse_opencode_quota(svc, now)
+            elif st == "deepseek" and deepseek is None:
+                deepseek = parse_deepseek_quota(svc, now)
+            elif st == "custom" and kimi is None:
+                data = result.get("data") if isinstance(result, dict) else None
+                fields = data.get("fields") if isinstance(data, dict) else None
+                if isinstance(fields, list) and _has_kimi_marker(fields):
+                    kimi = _parse_kimi_from_service(svc, now)
+    return UsageSnapshot(kimi=kimi, opencode=opencode, deepseek=deepseek, errors=errors)
+
+
+def deepseek_signature(q: Optional[DeepSeekQuota]) -> tuple:
+    """DeepSeek 变化检测快照：币种、余额（两位小数字符串）、可用状态。
+    单纯倒计时流逝不会出现在快照里，不会误触活动档。"""
+    if q is None:
+        return (None, None, None)
+    balance = f"{q.balance:.2f}" if q.balance is not None else None
+    avail = None if q.is_available is None else ("1" if q.is_available else "0")
+    return (q.currency or None, balance, avail)
+
+
+def service_signature(name: str, quota) -> Optional[tuple]:
+    """按服务名取变化检测快照；未知服务返回 None。"""
+    if name == "kimi":
+        return quota_signature(quota)
+    if name == "opencode":
+        if quota is None:
+            return (None, None, None)
+        return (quota.five_hour_remaining, quota.week_remaining, quota.month_remaining)
+    if name == "deepseek":
+        return deepseek_signature(quota)
+    return None

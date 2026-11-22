@@ -12,8 +12,11 @@ from widget_app.quota import (
     countdown_ratio,
     format_countdown_dh,
     format_countdown_hm,
+    parse_deepseek_quota,
     parse_kimi_quota,
+    parse_opencode_quota,
     parse_reset_datetime,
+    parse_usage_snapshot,
     poll_step,
     quota_signature,
 )
@@ -355,5 +358,201 @@ class TestPollStep(unittest.TestCase):
         self.assertEqual(poll_step((50,), (50, 50, 50), False, 0), (False, 0))
 
 
+class TestPollStepStringComponents(unittest.TestCase):
+    """DeepSeek 快照（币种/余额/可用状态）走字符串比较，不适用 epsilon。"""
+
+    def test_currency_change_activates(self):
+        self.assertEqual(poll_step(("CNY", "25.92", "1"), ("USD", "25.92", "1"), False, 0), (True, 0))
+
+    def test_balance_change_activates(self):
+        self.assertEqual(poll_step(("CNY", "25.92", "1"), ("CNY", "24.50", "1"), False, 0), (True, 0))
+
+    def test_availability_change_activates(self):
+        self.assertEqual(poll_step(("CNY", "25.92", "1"), ("CNY", "25.92", "0"), False, 0), (True, 0))
+
+    def test_identical_strings_stay_idle(self):
+        self.assertEqual(poll_step(("CNY", "25.92", "1"), ("CNY", "25.92", "1"), False, 0), (False, 0))
+
+    def test_none_to_string_activates(self):
+        self.assertEqual(poll_step((None, None, None), ("CNY", "25.92", "1"), False, 0), (True, 0))
+
+
+class TestOpenCodeQuota(unittest.TestCase):
+    """OpenCode：percent_used 为 0–100 已用百分比（与 Kimi 的 0–1 相反）。"""
+
+    def setUp(self):
+        self.now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        self.service = {
+            "id": 5,
+            "service_type": "opencode",
+            "name": "OpenCode",
+            "result": {"configured": True, "status": "ok", "data": {
+                "five_hour": {"percent_used": 25.0, "used": 3.21, "limit": 12.0,
+                              "resets_at": "2026-11-22T13:55:47.000Z"},
+                "week": {"percent_used": 10.69, "resets_at": "2026-11-23T00:00:00.000Z"},
+                "month": {"percent_used": 5.34, "resets_at": "2026-12-22T08:31:52.000Z"},
+            }},
+        }
+
+    def test_percent_used_converts_to_remaining(self):
+        q = parse_opencode_quota(self.service, now=self.now)
+        self.assertAlmostEqual(q.five_hour_remaining, 75.0)
+        self.assertAlmostEqual(q.week_remaining, 89.31)
+        self.assertAlmostEqual(q.month_remaining, 94.66)
+
+    def test_zero_and_full(self):
+        self.service["result"]["data"]["five_hour"]["percent_used"] = 0
+        self.assertAlmostEqual(parse_opencode_quota(self.service, now=self.now).five_hour_remaining, 100.0)
+        self.service["result"]["data"]["five_hour"]["percent_used"] = 100
+        self.assertAlmostEqual(parse_opencode_quota(self.service, now=self.now).five_hour_remaining, 0.0)
+
+    def test_out_of_range_clamped(self):
+        self.service["result"]["data"]["five_hour"]["percent_used"] = 250
+        self.assertAlmostEqual(parse_opencode_quota(self.service, now=self.now).five_hour_remaining, 0.0)
+        self.service["result"]["data"]["five_hour"]["percent_used"] = -5
+        self.assertAlmostEqual(parse_opencode_quota(self.service, now=self.now).five_hour_remaining, 100.0)
+
+    def test_invalid_percent_becomes_none(self):
+        self.service["result"]["data"]["five_hour"]["percent_used"] = "abc"
+        self.assertIsNone(parse_opencode_quota(self.service, now=self.now).five_hour_remaining)
+
+    def test_resets_at_parsed(self):
+        q = parse_opencode_quota(self.service, now=self.now)
+        self.assertEqual(q.reset_5h, datetime(2026, 11, 22, 13, 55, 47, tzinfo=timezone.utc))
+        self.assertEqual(q.reset_week, datetime(2026, 11, 23, 0, 0, tzinfo=timezone.utc))
+
+    def test_missing_tiers_become_none(self):
+        self.service["result"]["data"] = {"five_hour": {"percent_used": 10}}
+        q = parse_opencode_quota(self.service, now=self.now)
+        self.assertAlmostEqual(q.five_hour_remaining, 90.0)
+        self.assertIsNone(q.week_remaining)
+        self.assertIsNone(q.reset_week)
+
+    def test_service_id_and_stale(self):
+        self.service["result"]["stale_error"] = "上游超时"
+        q = parse_opencode_quota(self.service, now=self.now)
+        self.assertEqual(q.service_id, 5)
+        self.assertTrue(q.stale)
+
+    def test_resets_at_none_means_no_countdown(self):
+        # resets_at=None：外环只画轨道，不伪装成有效倒计时
+        self.service["result"]["data"]["five_hour"].pop("resets_at")
+        q = parse_opencode_quota(self.service, now=self.now)
+        self.assertIsNone(q.reset_5h)
+
+
+class TestDeepSeekQuota(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        self.service = {
+            "id": 2,
+            "service_type": "deepseek",
+            "name": "DeepSeek",
+            "result": {"configured": True, "status": "ok", "data": {
+                "is_available": True,
+                "balance_infos": [{"currency": "CNY", "total_balance": "25.92",
+                                   "granted_balance": "0.00", "topped_up_balance": "25.92"}],
+            }},
+        }
+
+    def test_balance_fields_as_decimal(self):
+        q = parse_deepseek_quota(self.service, now=self.now)
+        self.assertEqual(str(q.balance), "25.92")
+        self.assertEqual(str(q.topped_up_balance), "25.92")
+        self.assertEqual(str(q.granted_balance), "0.00")
+        self.assertEqual(q.currency, "CNY")
+        self.assertTrue(q.is_available)
+        self.assertEqual(q.service_id, 2)
+
+    def test_availability_false_and_string_truthy(self):
+        self.service["result"]["data"]["is_available"] = False
+        self.assertFalse(parse_deepseek_quota(self.service, now=self.now).is_available)
+        self.service["result"]["data"]["is_available"] = "1"
+        self.assertTrue(parse_deepseek_quota(self.service, now=self.now).is_available)
+        self.service["result"]["data"]["is_available"] = "false"
+        self.assertFalse(parse_deepseek_quota(self.service, now=self.now).is_available)
+
+    def test_empty_balance_infos(self):
+        self.service["result"]["data"]["balance_infos"] = []
+        q = parse_deepseek_quota(self.service, now=self.now)
+        self.assertIsNone(q.balance)
+        self.assertEqual(q.currency, "")
+        self.assertTrue(q.is_available)  # is_available 在 data 顶层，不受影响
+
+    def test_invalid_amount_becomes_none(self):
+        self.service["result"]["data"]["balance_infos"][0]["total_balance"] = "abc"
+        self.assertIsNone(parse_deepseek_quota(self.service, now=self.now).balance)
+
+    def test_missing_balance_infos(self):
+        self.service["result"]["data"].pop("balance_infos")
+        q = parse_deepseek_quota(self.service, now=self.now)
+        self.assertIsNone(q.balance)
+        self.assertEqual(q.currency, "")
+
+
+class TestUsageSnapshot(unittest.TestCase):
+    """一次响应解析三服务：按 service_type 分类，9527 等无关服务忽略。"""
+
+    def setUp(self):
+        self.now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        self.kimi = {
+            "id": 1, "service_type": "custom", "name": "Kimi Code",
+            "result": {"status": "ok", "data": {"fields": [
+                {"path": "usages.limit_5h.used_ratio", "label": "5 小时剩余",
+                 "type": "percentage_fraction_ring", "value": 0.05},
+            ]}},
+        }
+        self.deepseek = {
+            "id": 2, "service_type": "deepseek", "name": "DeepSeek",
+            "result": {"status": "ok", "data": {"is_available": True, "balance_infos": [
+                {"currency": "CNY", "total_balance": "25.92"}]}},
+        }
+        self.code9527 = {
+            "id": 3, "service_type": "custom", "name": "9527CODE",
+            "result": {"status": "ok", "data": {"fields": [
+                {"path": "data.quota", "label": "余额", "type": "balance", "value": 46.57}]}},
+        }
+        self.opencode = {
+            "id": 5, "service_type": "opencode", "name": "OpenCode",
+            "result": {"status": "ok", "data": {"five_hour": {"percent_used": 25.0}}},
+        }
+
+    def test_three_services_parsed(self):
+        snap = parse_usage_snapshot([self.kimi, self.deepseek, self.code9527, self.opencode], now=self.now)
+        self.assertIsNotNone(snap.kimi)
+        self.assertIsNotNone(snap.deepseek)
+        self.assertIsNotNone(snap.opencode)
+        self.assertAlmostEqual(snap.kimi.five_hour_remaining, 95.0)
+        self.assertEqual(snap.deepseek.currency, "CNY")
+        self.assertAlmostEqual(snap.opencode.five_hour_remaining, 75.0)
+        self.assertEqual((snap.kimi.service_id, snap.opencode.service_id, snap.deepseek.service_id), (1, 5, 2))
+
+    def test_9527_not_mistaken_for_kimi(self):
+        snap = parse_usage_snapshot([self.code9527, self.deepseek], now=self.now)
+        self.assertIsNone(snap.kimi)
+        self.assertIsNotNone(snap.deepseek)
+
+    def test_error_status_recorded_in_errors(self):
+        broken = {
+            "id": 5, "service_type": "opencode", "name": "OpenCode",
+            "result": {"status": "error", "error": "上游 500"},
+        }
+        snap = parse_usage_snapshot([self.kimi, broken], now=self.now)
+        self.assertEqual(snap.errors.get("opencode"), "上游 500")
+
+    def test_missing_services_are_none(self):
+        snap = parse_usage_snapshot([self.kimi], now=self.now)
+        self.assertIsNone(snap.opencode)
+        self.assertIsNone(snap.deepseek)
+        self.assertEqual(snap.errors, {})
+
+    def test_non_list_payload(self):
+        snap = parse_usage_snapshot(None, now=self.now)
+        self.assertIsNone(snap.kimi)
+        self.assertIsNone(snap.opencode)
+        self.assertIsNone(snap.deepseek)
+
+
 if __name__ == "__main__":
     unittest.main()
+
