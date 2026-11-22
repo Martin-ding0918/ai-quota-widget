@@ -51,8 +51,8 @@ Windows 桌面常驻小组件：始终置顶，展示所选服务的额度、余
 **方式二：源码运行**（Python ≥ 3.10，Windows）
 
 ```sh
-git clone https://github.com/Martin-ding0918/kimi-quota-widget.git
-cd kimi-quota-widget
+git clone https://github.com/Martin-ding0918/ai-quota-widget.git
+cd ai-quota-widget
 pip install -r requirements.txt
 python main.py
 ```
