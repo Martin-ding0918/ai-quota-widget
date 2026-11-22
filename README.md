@@ -8,6 +8,9 @@ Windows 桌面常驻小组件：始终置顶，实时展示 **Kimi Code / OpenCo
 ![迷你卡（贴边收起）](docs/screenshots/mini-card.png)
 ![展开面板](docs/screenshots/panel.png)
 
+左右贴边时自动切换竖排：![迷你卡（竖排）](docs/screenshots/mini-card-vertical.png)
+![面板（竖排）](docs/screenshots/panel-vertical.png)
+
 ## 功能
 
 - **展开面板**：左、右贴边时三个服务上下排列，其他位置横排。
@@ -24,6 +27,9 @@ Windows 桌面常驻小组件：始终置顶，实时展示 **Kimi Code / OpenCo
   连续 3 次静默逐服务退出。手动「立即刷新」全量 force 一次覆盖三服务。
 - **低额度提醒**：5h 剩余 <10% 时迷你卡内环缓慢闪烁（右键菜单可关）。
 - 401 自动重登录；位置、贴边状态、闪烁开关全部本地记忆。
+- **渲染分层（v1.2）**：静态内容（卡片骨架/标题/明细/余额）按数据签名缓存为
+  Pixmap，仅额度环、环心数字与倒计时文字逐帧重绘；形变动画只插值几何与透明度，
+  中途反向无缝续播。
 
 ## 前置条件
 
@@ -74,7 +80,7 @@ python main.py
 python -m unittest discover -s tests -v
 ```
 
-94 项单元测试覆盖额度解析与换算、贴边几何、双速轮询档位判定、登录/401 重登录、
+154 项单元测试覆盖额度解析与换算、贴边几何、双速轮询档位判定、登录/401 重登录、
 错误分支等纯逻辑（目标平台即 Windows，本机直接跑）。GUI 部分人工验收。
 
 ## 许可

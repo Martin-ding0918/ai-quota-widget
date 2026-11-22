@@ -1,26 +1,33 @@
 """AI 用量悬浮窗：一个窗口、两种布局（展开三列面板 ⇄ 贴边双单元迷你卡）。
 
-展开面板：左、右贴边时三组上下排列，其余状态横排。
-- Kimi Code：5h 主环（同心双环：内环额度/外环倒计时）+ 月总额/月代码额度条
-  + 两档共用的月重置裸倒计时。
-- OpenCode：5h 主环和倒计时 + 每周/每月额度条 + 月重置倒计时。
-- DeepSeek：大字余额 + 充值/赠送余额。
-- 服务状态见 Tooltip；单服务断线只灰显该服务的额度环。
+数据状态、轮询、贴边/拖动事件与动画状态机在本文件；纯几何见 layout.py，
+卡片与静态层绘制见 cards.py。
 
-迷你卡：贴上下边时横排，贴左右边时竖排。Kimi 与 OpenCode 各占一个 96×96 单元，沿用同心
-双环（内环=5h 额度阈值色、外环=5h 倒计时中性色、环心=剩余百分比）。DeepSeek
-不进迷你卡；某服务无数据只将该单元灰显为 "—"，另一个不动。resets_at 缺失时
+展开面板（512×196，三张 160×176 服务卡横排；左右贴边展开为 176×572 竖排）：
+- Kimi Code：5h 主环（同心双环：内环额度/外环倒计时）+ 月总额/月代码额度条
+  + 两档共用的月重置裸倒计时（format_countdown_hm/dh）。
+- OpenCode：5h 主环 + 每周/每月额度条，周/月倒计时分别跟随自己的额度条。
+- DeepSeek：大字余额 + 充值/赠送余额 + 可用状态（不强行换算成圆环）。
+- 每卡独立状态点；单服务断线只灰显该卡，其他服务不受影响。
+
+贴边迷你卡（192×96 横排 / 96×192 竖排）：Kimi 与 OpenCode 各占一个 96×96
+单元，同心双环（内环=5h 额度阈值色、外环=5h 倒计时中性色、环心=剩余百分比）。
+DeepSeek 不进迷你卡；某服务无数据只将该单元灰显为 "—"。resets_at 缺失时
 外环只画轨道，不伪装成有效倒计时。
 
-形变：单一进度 _t（0=面板 → 1=迷你卡）驱动窗口矩形与内容同帧插值——两个主环
-分别从各自展开列位置滑向迷你卡左右单元中心，标题分别插值，倒计时外环淡入，
-条目与 DeepSeek 列按 1−t 渐隐。可打断、可续播。
+形变（v1.2）：绘制层重构后动画只负责几何与透明度——
+- 静态层（卡片 chrome/标题/明细/余额）按 detail_alpha 淡出；
+- 迷你层（标题）按 mini_alpha 淡入；
+- 主环连续形变（位置/半径插值，弧长编码全程不变）；
+- 窗口矩形同帧插值；一次动画内方向固定，中途反向只换目标续播；
+- 静态内容缓存于 RenderCache（数据/DPR/方向变化才重建），动画帧只做
+  缓存绘制与少量圆弧，保证帧预算。
 
-轮询（v1.1 按服务双速）：空闲档每 3 分钟读一次全量缓存；按服务独立做变化检测
+轮询（按服务双速）：空闲档每 3 分钟读一次全量缓存；按服务独立做变化检测
 （Kimi 三档百分比 / OpenCode 三档百分比 / DeepSeek 币种+余额+状态）→ 有变化的
 服务进入活动档：每 1 分钟先读全量缓存，再仅对活动服务逐个单服务 force 回源；
-连续 3 次静默逐服务退出。手动「立即刷新」= 全量 force 一次覆盖三个服务。
-单服务 force 失败只标记该服务错误并保留其缓存值。
+连续 3 次静默逐服务退出。手动「立即刷新」= 全量 force 一次覆盖三个服务
+（不再追加逐服务 force）。单服务 force 失败只标记该服务错误并保留其缓存值。
 """
 
 from __future__ import annotations
@@ -28,10 +35,10 @@ from __future__ import annotations
 import threading
 import time
 import webbrowser
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from PySide6.QtCore import QEasingCurve, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QCursor, QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QCursor, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -43,11 +50,41 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import cards as cards_mod
 from . import config
-from .api_client import ApiError, OpenUsageClient, OpenUsageError
-from .quota import (
+from .api_client import OpenUsageClient, OpenUsageError
+from .cards import COLOR_SUBTLE, RenderCache, currency_symbol
+from .layout import (
+    CARD_QUOTA_RING_RADIUS,
+    CARD_QUOTA_RING_WIDTH,
+    CARD_RING_RADIUS,
+    COUNTDOWN1_Y,
+    COUNTDOWN2_Y,
+    HERO_INNER_R,
+    HERO_OUTER_R,
+    HERO_RING_W,
+    MorphState,
+    PANEL_H_H,
+    PANEL_H_W,
+    PANEL_V_H,
     SERVICE_KEYS,
+    SERVICE_TITLES,
+    STATUS_Y,
+    VERTICAL_EDGES,
+    _lerp,
+    _shape_orientation,
+    edge_rect,
+    interpolate_morph,
+    mini_cell_rects,
+    mini_ring_anchors,
+    panel_card_rects,
+    panel_ring_anchors,
+    panel_size,
+    smoothstep,
+)
+from .quota import (
     countdown_ratio,
+    format_countdown_dh,
     format_countdown_hm,
     parse_usage_snapshot,
     poll_step,
@@ -57,111 +94,10 @@ from .quota import (
 POLL_IDLE_MS = 3 * 60 * 1000        # 空闲档：读服务端缓存，3 分钟一次
 POLL_ACTIVE_MS = 60 * 1000          # 活动档：活动服务逐个单服务 force，1 分钟一次
 UI_TICK_MS = 1000                   # 本地 UI 刷新：倒计时 / 弧长 / 闪烁
-FRESH_MAX_AGE_MIN = 15              # 数据超过该分钟数视为陈旧（黄点）
-
-WIDTH, HEIGHT = 480, 190            # 展开态三列面板
-SIDE_PANEL_WIDTH = WIDTH // 3
-SIDE_SECTION_HEIGHT = 184
-SIDE_PANEL_HEIGHT = 2 * SIDE_SECTION_HEIGHT + 160
-CARD_CELL_SIZE = 96                 # 迷你卡单个服务的尺寸
-VERTICAL_EDGES = ("left", "right")
-RING_RADIUS = 20.0                  # 面板主环半径
-CARD_RING_RADIUS = 23.0             # 迷你卡外环（倒计时）半径
-CARD_QUOTA_RING_RADIUS = 16.0       # 迷你卡内环（额度）半径
-PANEL_TIMER_RING_RADIUS = 24.0      # 面板外环半径（渐隐淡入用）
-RING_THICKNESS = 6.0                # 面板主环线宽
-CARD_TIMER_RING_WIDTH = 4.0         # 迷你卡外环线宽
-CARD_QUOTA_RING_WIDTH = 5.0         # 迷你卡内环线宽
-RING_CY = 46.0                      # 面板主环圆心 y
-CARD_CY = 58.0                      # 迷你卡圆心 y
-
 SNAP_THRESHOLD = 10                 # 距屏幕可用边缘 ≤10px 松手即吸附
 AUTO_COLLAPSE_MS = 1500             # 悬停展开后光标移开多久自动收回
 ANIM_MS = 220                       # 形变动画基准时长
-BLINK_HALF_PERIOD_MS = 800          # 低额度闪烁半周期
-
-COLOR_BG = QColor(20, 22, 27, 215)
-COLOR_TRACK = QColor(255, 255, 255, 32)
-COLOR_TEXT = QColor(235, 236, 240)
-COLOR_SUBTLE = QColor(158, 164, 174)
-COLOR_GREEN = QColor(74, 200, 126)
-COLOR_YELLOW = QColor(240, 181, 60)
-COLOR_RED = QColor(237, 90, 82)
-COLOR_GRAY = QColor(148, 153, 162)
-COLOR_TIMER = QColor(200, 205, 215, 170)  # 倒计时外环中性色，不占绿黄红语义
-
-SERVICE_KEYS = ("kimi", "opencode", "deepseek")
-SERVICE_TITLES = {"kimi": "Kimi Code", "opencode": "OpenCode", "deepseek": "DeepSeek"}
-# 三列的横向布局：列原点与列中心（面板态）
-COL_X = (0.0, 160.0, 320.0)
-DETAIL_ROW_Y = (112, 136)
-
-CURRENCY_SYMBOLS = {"CNY": "¥", "USD": "$", "EUR": "€"}
-
-
-def currency_symbol(code: str) -> str:
-    return CURRENCY_SYMBOLS.get((code or "").upper(), (code or "").upper())
-
-
-def color_for_remaining(remaining):
-    if remaining is None:
-        return COLOR_GRAY
-    if remaining > 30:
-        return COLOR_GREEN
-    if remaining >= 10:
-        return COLOR_YELLOW
-    return COLOR_RED
-
-
-def format_countdown(target, now):
-    """裸倒计时短文案：4小时42分 / 30天8.5小时；过期/缺失由调用方处理。"""
-    if target is None:
-        return "--"
-    seconds = (target - now).total_seconds()
-    if seconds <= 0:
-        return "0分"
-    days = int(seconds // 86400)
-    if days >= 1:
-        return f"{days}天"
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    return f"{hours}h{minutes}m"
-
-
-def _clamp(v, lo, hi):
-    return max(lo, min(hi, v))
-
-
-def _lerp(a, b, t):
-    return a + (b - a) * t
-
-
-def _lerp_rect(r1: QRect, r2: QRect, t: float) -> QRect:
-    return QRect(
-        int(round(_lerp(r1.left(), r2.left(), t))),
-        int(round(_lerp(r1.top(), r2.top(), t))),
-        int(round(_lerp(r1.width(), r2.width(), t))),
-        int(round(_lerp(r1.height(), r2.height(), t))),
-    )
-
-
-def edge_rect(edge, expanded, along, geo):
-    """按屏幕可用区域定位贴边窗口，迷你卡的两个单元沿边排列。"""
-    if expanded and edge in VERTICAL_EDGES:
-        w, h = SIDE_PANEL_WIDTH, min(SIDE_PANEL_HEIGHT, geo.height())
-    elif expanded:
-        w, h = WIDTH, HEIGHT
-    elif edge in VERTICAL_EDGES:
-        w, h = CARD_CELL_SIZE, 2 * CARD_CELL_SIZE
-    else:
-        w, h = 2 * CARD_CELL_SIZE, CARD_CELL_SIZE
-    if edge in ("top", "bottom"):
-        x = _clamp(int(along), geo.left(), geo.right() - w + 1)
-        y = geo.top() if edge == "top" else geo.bottom() - h + 1
-        return QRect(x, y, w, h)
-    y = _clamp(int(along), geo.top(), geo.bottom() - h + 1)
-    x = geo.left() if edge == "left" else geo.right() - w + 1
-    return QRect(x, y, w, h)
+BLINK_HALF_PERIOD_MS = 800          # 低额度闪烁半周期（亮/暗各 0.8s）
 
 
 def _force_targets(active_services, service_ids, manual: bool):
@@ -174,17 +110,6 @@ def _force_targets(active_services, service_ids, manual: bool):
     if manual:
         return [n for n in names if service_ids.get(n)]
     return [n for n in names if n in active_services and service_ids.get(n)]
-
-
-def _first_service_error(services) -> str:
-    if not isinstance(services, list):
-        return ""
-    for svc in services:
-        if isinstance(svc, dict):
-            result = svc.get("result")
-            if isinstance(result, dict) and result.get("error"):
-                return str(result["error"])
-    return ""
 
 
 class SettingsDialog(QDialog):
@@ -229,7 +154,6 @@ class QuotaWidget(QWidget):
         except config.ConfigError:
             pass  # 迁移失败保留 config.json 旧字段，旧回退路径仍有效
         self._client = None
-        self._quota = None          # 兼容旧引用（指向 kimi 配额）
         self._quotas = {n: None for n in SERVICE_KEYS}
         self._errors = {n: "" for n in SERVICE_KEYS}
         self._service_ids = {n: None for n in SERVICE_KEYS}
@@ -240,23 +164,17 @@ class QuotaWidget(QWidget):
         self._fetch_inflight = False
         self._drag_offset = None
         self._grab_frac = None
-        self._morph = None
-        self._t = 0.0  # 0 = expanded panel, 1 = collapsed card
-        self._morph_target = None
-        self._morph_start_rect = None
-        self._morph_start_t = 0.0
-        self._morph_start_layout = 0.0
-        self._morph_end_layout = 0.0
-        self._morph_end_rect = None
         self._menu_open = False
-        self._settings_dialog = None
 
-        edge = str(self._cfg.get("snap_edge") or "")
-        self._snap_edge = edge if edge in ("top", "bottom", "left", "right") else ""
-        # 拖离边缘时保留原迷你卡方向，直到下一次贴边，供展开动画使用。
-        self._card_edge = self._snap_edge
-        self._side_layout = float(self._snap_edge in VERTICAL_EDGES)
+        # 形变状态机（v1.2）：方向在一次动画内固定，_t 为服务形变进度
+        self._t = 0.0
+        self._morph_state = None
+        self._morph = None
+        self._snap_edge = ""
+        self._card_orientation = "horizontal"   # 当前迷你卡排列（淡出层方向）
+        self._panel_orientation = "horizontal"  # 当前面板排列（淡入层方向）
         self._blink_enabled = bool(self._cfg.get("blink_enabled", True))
+        self._render_cache = RenderCache()
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -310,7 +228,8 @@ class QuotaWidget(QWidget):
     def refresh(self, force_all: bool = False):
         """发起一次后台轮询。
 
-        force_all=True（手动「立即刷新」）→ 全量 force 一次覆盖三个服务。
+        force_all=True（手动「立即刷新」）→ 全量 force 一次覆盖三个服务，
+        不再追加逐服务 force（避免重复回源）。
         否则空闲档读缓存；活动档读缓存后再对活动服务逐个单服务 force。
         """
         if self._fetch_inflight or self._client is None:
@@ -327,20 +246,20 @@ class QuotaWidget(QWidget):
             try:
                 services = client.get_usage(force=force_all)
                 snapshot = parse_usage_snapshot(services)
-                # 活动档（或手动全量后）对已知服务逐个单服务 force 回源，
-                # 用实时结果覆盖全量缓存中的同 id 服务。
-                for name in targets:
-                    sid = ids.get(name)
-                    if sid is None:
-                        continue
-                    try:
-                        svc = client.get_service_usage(sid, force=True)
-                        services = [
-                            svc if s.get("id") == sid else s for s in services
-                        ]
-                        snapshot = parse_usage_snapshot(services)
-                    except OpenUsageError as exc:
-                        force_errors[name] = str(exc)  # 保留该服务缓存值并标记错误
+                if not force_all:
+                    # 活动档：读缓存后仅对活动服务逐个单服务 force 回源
+                    for name in targets:
+                        sid = ids.get(name)
+                        if sid is None:
+                            continue
+                        try:
+                            svc = client.get_service_usage(sid, force=True)
+                            services = [
+                                svc if s.get("id") == sid else s for s in services
+                            ]
+                            snapshot = parse_usage_snapshot(services)
+                        except OpenUsageError as exc:
+                            force_errors[name] = str(exc)  # 保留该服务缓存值并标记错误
                 self.snapshot_received.emit((snapshot, force_errors))
             except OpenUsageError as exc:
                 self.failed.emit(str(exc))
@@ -356,7 +275,7 @@ class QuotaWidget(QWidget):
             self._quotas[name] = quota
             if quota is not None and quota.service_id is not None:
                 self._service_ids[name] = quota.service_id
-            # 记录单服务 force 失败或服务端返回的错误，供悬浮提示和额度环使用。
+            # 两类错误都落到该服务的状态：单服务 force 失败、服务端 status=error
             self._errors[name] = force_errors.get(name, "") or (snapshot.errors or {}).get(name, "")
         self._last_error = ""
         self._fetch_inflight = False
@@ -389,12 +308,8 @@ class QuotaWidget(QWidget):
             else:
                 self._active_services.discard(name)
         self._apply_poll_cadence(any_active)
-        self._update_card_tooltip()
-        self.update()
-
-    def _on_failed(self, message: str):
-        self._last_error = message
-        self._fetch_inflight = False
+        self._render_cache.invalidate()  # 数据变化 → 静态层重建
+        self._update_tooltip()
         self.update()
 
     def _apply_poll_cadence(self, any_active: bool):
@@ -411,33 +326,34 @@ class QuotaWidget(QWidget):
     # ---- 本地每秒刷新 ----
 
     def _tick(self):
-        self._update_card_tooltip()
+        self._update_tooltip()
         self.update()
 
-    def _update_card_tooltip(self):
+    def _update_tooltip(self):
         now = datetime.now(timezone.utc).astimezone()
         lines = []
         for name in SERVICE_KEYS:
-            q = self._quotas.get(name)
             title = SERVICE_TITLES[name]
-            error = self._errors.get(name) or self._last_error
+            quota = self._quotas.get(name)
+            error = self._errors.get(name) or (self._last_error if name == "kimi" else "")
             if error:
-                detail = error
-            elif q is None:
-                detail = "暂无数据"
+                lines.append(f"{title}：{error}")
+            elif quota is None:
+                lines.append(f"{title}：暂无数据")
             elif name == "deepseek":
-                detail = "余额已读取" if q.balance is not None else "暂无余额"
-                if q.is_available is False:
-                    detail = "不可用"
-            elif q.five_hour_remaining is None:
-                detail = "暂无额度"
+                if quota.is_available is False:
+                    lines.append(f"{title}：不可用")
+                elif quota.balance is not None:
+                    lines.append(f"{title}：余额 {currency_symbol(quota.currency)}{quota.balance}")
+                else:
+                    lines.append(f"{title}：暂无余额")
+            elif quota.five_hour_remaining is None:
+                lines.append(f"{title}：暂无额度")
             else:
-                reset = format_countdown(q.reset_5h, now) if q.reset_5h else None
+                reset = format_countdown_hm(quota.reset_5h, now) if quota.reset_5h else None
                 reset_txt = f"，{reset}后重置" if reset else ""
-                detail = f"5h 剩余 {q.five_hour_remaining:.0f}%{reset_txt}"
-            if not error and q is not None and q.stale:
-                detail += "（数据陈旧）"
-            lines.append(f"{title}：{detail}")
+                stale_txt = "（数据陈旧）" if quota.stale else ""
+                lines.append(f"{title}：5h 剩余 {quota.five_hour_remaining:.0f}%{reset_txt}{stale_txt}")
         tip = "\n".join(lines) or "AI 用量悬浮窗"
         if self.toolTip() != tip:
             self.setToolTip(tip)
@@ -457,7 +373,6 @@ class QuotaWidget(QWidget):
         geo = self._current_screen_geo()
         if geo is None:
             self._snap_edge = ""
-            self._side_layout = 0.0
             self._restore_position()
             return
         along = self._cfg.get("window_x") if self._snap_edge in ("top", "bottom") else self._cfg.get("window_y")
@@ -474,11 +389,11 @@ class QuotaWidget(QWidget):
         x = self._cfg.get("window_x")
         y = self._cfg.get("window_y")
         if isinstance(x, int) and isinstance(y, int) and geo is not None:
-            x = max(geo.left(), min(x, geo.right() - WIDTH + 1))
-            y = max(geo.top(), min(y, geo.bottom() - HEIGHT + 1))
-            self.setGeometry(x, y, WIDTH, HEIGHT)
+            x = max(geo.left(), min(x, geo.right() - PANEL_H_W + 1))
+            y = max(geo.top(), min(y, geo.bottom() - PANEL_H_H + 1))
+            self.setGeometry(x, y, PANEL_H_W, PANEL_H_H)
         elif geo is not None:
-            self.setGeometry(geo.right() - WIDTH - 40, geo.top() + 60, WIDTH, HEIGHT)
+            self.setGeometry(geo.right() - PANEL_H_W - 40, geo.top() + 60, PANEL_H_W, PANEL_H_H)
 
     def _nearest_edge(self, force=False):
         geo = self._current_screen_geo()
@@ -514,33 +429,52 @@ class QuotaWidget(QWidget):
         self._cfg["snap_edge"] = self._snap_edge
         config.save_config(self._cfg)
 
-    # ---- 形变动画 ----
+    # ---- 形变状态机 ----
 
     def _morph_to(self, target, end_rect, animated=True):
+        """形变到 target（0.0=面板 1.0=迷你卡）与 end_rect。
+
+        方向在一次动画内固定（panel/card 层各自的方向），
+        中途反向只更新 target 与 end_rect 并从当前进度续播。
+        """
         self._stop_morph()
-        end_layout = float(self._snap_edge in VERTICAL_EDGES)
-        change = max(abs(target - self._t), abs(end_layout - self._side_layout))
+        end_vertical = end_rect.width() < end_rect.height()
+        end_panel_or = "vertical" if end_vertical else "horizontal"
+        end_card_or = "vertical" if end_vertical else "horizontal"
         if (
             not animated
             or not self.isVisible()
-            or (change < 0.005 and self.geometry() == end_rect)
+            or (abs(target - self._t) < 0.005 and self.geometry() == end_rect)
         ):
-            self._morph_target = None
+            self._morph_state = None
             self._t = target
-            self._side_layout = end_layout
+            self._panel_orientation = end_panel_or
+            self._card_orientation = end_card_or
             self.setGeometry(end_rect)
             self.update()
             return
-        self._morph_target = target
+        self._morph_state = MorphState(
+            progress=0.0,
+            start_t=self._t,
+            target_t=target,
+            start_rect=QRect(self.geometry()),
+            end_rect=QRect(end_rect),
+            panel_orientation=(self._panel_orientation if target == 1.0
+                               else end_panel_or),
+            card_orientation=(self._card_orientation if target == 0.0
+                              else end_card_or),
+            panel_cells=panel_card_rects(self._panel_orientation
+                                         if target == 1.0 else end_panel_or),
+            card_cells=mini_cell_rects(self._card_orientation
+                                       if target == 0.0 else end_card_or),
+        )
         self._morph_start_t = self._t
-        self._morph_start_layout = self._side_layout
-        self._morph_end_layout = end_layout
         self._morph_start_rect = QRect(self.geometry())
         self._morph_end_rect = QRect(end_rect)
         anim = QVariantAnimation(self)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setDuration(max(60, int(ANIM_MS * change)))
+        anim.setDuration(max(60, int(ANIM_MS * abs(target - self._morph_start_t))))
         anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         anim.valueChanged.connect(self._on_morph_tick)
         anim.finished.connect(self._on_morph_done)
@@ -548,25 +482,29 @@ class QuotaWidget(QWidget):
         anim.start()
 
     def _on_morph_tick(self, fraction):
-        if self._morph_target is None:
+        if self._morph_state is None:
             return
-        self._t = _lerp(self._morph_start_t, self._morph_target, fraction)
-        self._side_layout = _lerp(self._morph_start_layout, self._morph_end_layout, fraction)
-        self.setGeometry(_lerp_rect(self._morph_start_rect, self._morph_end_rect, fraction))
+        self._t = self._morph_state.start_t + (self._morph_state.target_t - self._morph_state.start_t) * fraction
+        rect, _anchors = interpolate_morph(self._morph_state, fraction)
+        self.setGeometry(rect)
         self.update()
 
     def _on_morph_done(self):
         self._morph = None
-        self._morph_target = None
-        if self._morph_end_rect is not None:
-            self.setGeometry(self._morph_end_rect)
+        if self._morph_state is not None:
+            self._t = self._morph_state.target_t
+            self._panel_orientation = self._morph_state.panel_orientation
+            self._card_orientation = self._morph_state.card_orientation
+            self.setGeometry(self._morph_state.end_rect)
+        self._morph_state = None
+        self._morph_end_rect = None
         self.update()
 
     def _stop_morph(self):
         if self._morph is not None:
             anim = self._morph
             self._morph = None
-            self._morph_target = None
+            self._morph_state = None
             self._morph_end_rect = None
             anim.stop()
             anim.deleteLater()
@@ -575,7 +513,6 @@ class QuotaWidget(QWidget):
 
     def _snap(self, edge, animated=True):
         self._snap_edge = edge
-        self._card_edge = edge
         self._auto_collapse.stop()
         panel, card = self._target_rects()
         if panel is None:
@@ -584,19 +521,22 @@ class QuotaWidget(QWidget):
         self._morph_to(1.0, card, animated=animated)
 
     def _unsnap(self, grab_frac=None):
+        edge = self._snap_edge
         self._snap_edge = ""
         self._auto_collapse.stop()
         geo = self._current_screen_geo()
         if geo is not None:
             fx, fy = grab_frac if grab_frac else (0.0, 0.0)
             cursor = QCursor.pos()
-            x = _clamp(int(cursor.x() - fx * WIDTH), geo.left(), geo.right() - WIDTH + 1)
-            y = _clamp(int(cursor.y() - fy * HEIGHT), geo.top(), geo.bottom() - HEIGHT + 1)
-            target = QRect(x, y, WIDTH, HEIGHT)
-            self._cfg["window_x"] = x
-            self._cfg["window_y"] = y
+            # 展开面板的方向与贴边定位统一走 edge_rect（左/右边 → 竖面板）
+            if edge in VERTICAL_EDGES:
+                target = edge_rect(edge, True, int(cursor.y() - fy * PANEL_V_H), geo)
+            else:
+                target = edge_rect(edge or "top", True, int(cursor.x() - fx * PANEL_H_W), geo)
+            self._cfg["window_x"] = target.x()
+            self._cfg["window_y"] = target.y()
         else:
-            target = QRect(self.x(), self.y(), WIDTH, HEIGHT)
+            target = QRect(self.x(), self.y(), PANEL_H_W, PANEL_H_H)
         self._cfg["snap_edge"] = ""
         config.save_config(self._cfg)
         self._morph_to(0.0, target)
@@ -625,207 +565,191 @@ class QuotaWidget(QWidget):
         if self._snap_edge and not self.underMouse() and self._t < 0.999:
             self._collapse_to_card(animated=True)
 
-    # ---- 绘制 ----
+    # ---- 绘制（三层：背景 / 静态层 / 动态环）----
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        w, h = self.width(), self.height()
         t = self._t
-        w = self.width()
 
+        # 底层：窗口背景
         path = QPainterPath()
-        path.addRoundedRect(QRectF(0.5, 0.5, w - 1.0, self.height() - 1.0), 12.0, 12.0)
-        p.fillPath(path, COLOR_BG)
+        path.addRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), 12.0, 12.0)
+        p.fillPath(path, cards_mod.COLOR_BG)
 
         now = datetime.now(timezone.utc).astimezone()
-        kimi = self._quotas["kimi"]
-        opencode = self._quotas["opencode"]
-        deepseek = self._quotas["deepseek"]
-        panel_cells = tuple(
-            (_lerp(x, 0.0, self._side_layout), idx * SIDE_SECTION_HEIGHT * self._side_layout)
-            for idx, x in enumerate(COL_X)
-        )
+        kimi = self._quotas.get("kimi")
+        opencode = self._quotas.get("opencode")
+        panel_alpha = 1.0 - smoothstep(0.05, 0.50, t)
+        mini_alpha = smoothstep(0.30, 0.80, t)
+        dim = 0.45 if self._last_error else 1.0
 
-        second_cell = (0, CARD_CELL_SIZE) if self._card_edge in VERTICAL_EDGES else (CARD_CELL_SIZE, 0)
-        card_cells = ((0, 0), second_cell)
-        card_height = 2 * CARD_CELL_SIZE if self._card_edge in VERTICAL_EDGES else CARD_CELL_SIZE
-        panel_height = _lerp(HEIGHT, SIDE_PANEL_HEIGHT, self._side_layout)
-        if self._side_layout > 0:
-            # 小屏幕限制展开高度时，按可用高度压缩内容，保留最下面的余额行。
-            p.scale(1.0, min(1.0, self.height() / _lerp(panel_height, card_height, t)))
-        for idx, (name, quota) in enumerate((("kimi", kimi), ("opencode", opencode))):
-            card_x, card_y = card_cells[idx]
-            panel_x, panel_y = panel_cells[idx]
-            self._draw_double_ring(
-                p, _lerp(panel_x + SIDE_PANEL_WIDTH / 2, card_x + CARD_CELL_SIZE / 2, t),
-                _lerp(panel_y + RING_CY, card_y + CARD_CY, t), t,
-                remaining=quota.five_hour_remaining if quota is not None else None,
-                timer_ratio=countdown_ratio(quota.reset_5h, now) if quota is not None else None,
-                color=self._service_color(name),
+        # 中层：静态展开内容（数据变化时 RenderCache 重建；随 detail_alpha 淡出）
+        self._render_cache.ensure(
+            (self._panel_orientation, self._card_orientation),
+            self.devicePixelRatioF(),
+            self._card_specs(now),
+        )
+        if panel_alpha > 0.004:
+            pix = self._render_cache.pixmap(self._panel_orientation)
+            if pix is not None:
+                p.setOpacity(panel_alpha * dim)
+                p.drawPixmap(QRect(0, 0, w, h), pix)
+
+        # 顶层：主环连续形变（弧长编码全程不变：内环=额度、外环=倒计时）
+        anchors = self._ring_anchors()
+        for name, (cx, cy) in anchors.items():
+            quota = self._quotas.get(name)
+            remaining = quota.five_hour_remaining if quota is not None else None
+            reset_at = quota.reset_5h if quota is not None else None
+            ratio = countdown_ratio(reset_at, now) if reset_at is not None else None
+            color = self._service_color(name)
+            cards_mod.draw_double_ring(
+                p, cx, cy,
+                r_inner=_lerp(HERO_INNER_R, CARD_QUOTA_RING_RADIUS, t),
+                r_outer=_lerp(HERO_OUTER_R, CARD_RING_RADIUS, t),
+                w_inner=_lerp(HERO_RING_W, CARD_QUOTA_RING_WIDTH, t),
+                remaining=remaining,
+                timer_ratio=ratio,
+                color=color,
+                outer_opacity=mini_alpha if name in ("kimi", "opencode") else 0.0,
             )
 
-        # 面板明细随收起渐隐。
-        if t < 0.995:
-            fade = (1.0 - t) * (0.45 if self._last_error else 1.0)
-            p.setOpacity(fade)
-            for idx, (panel_x, panel_y) in enumerate(panel_cells):
-                p.save()
-                p.translate(panel_x - COL_X[idx], panel_y)
-                if idx == 0:
-                    self._draw_kimi_extras(p, kimi, now)
-                elif idx == 1:
-                    self._draw_opencode_extras(p, opencode, now)
-                else:
-                    self._draw_deepseek_column(p, deepseek)
-                p.restore()
+        # 面板层动态文字：5h/周/月 倒计时（随 detail_alpha 淡出，位置随窗口缩放）
+        if panel_alpha > 0.004 and self._panel_orientation:
+            pw, ph = panel_size(self._panel_orientation)
+            sx, sy = w / pw, h / ph
+            p.setOpacity(panel_alpha * dim)
+            p.setFont(cards_mod._card_font(9))
+            rects = panel_card_rects(self._panel_orientation)
+            for idx, name in enumerate(("kimi", "opencode")):
+                quota = self._quotas.get(name)
+                r = rects[idx]
+                rs = QRectF(r.x() * sx, r.y() * sy, r.width() * sx, r.height() * sy)
+                if quota is not None and quota.reset_5h is not None:
+                    p.drawText(QRectF(rs.x(), rs.y() + STATUS_Y * sy, rs.width(), 14 * sy),
+                               Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                               format_countdown_hm(quota.reset_5h, now))
+            if kimi is not None and kimi.reset_month is not None:
+                p.drawText(QRectF((rects[0].x() + 14) * sx, (rects[0].y() + COUNTDOWN2_Y) * sy,
+                                  132 * sx, 14 * sy),
+                           Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                           format_countdown_dh(kimi.reset_month, now))
+            if opencode is not None:
+                if opencode.reset_week is not None:
+                    p.drawText(QRectF((rects[1].x() + 14) * sx, (rects[1].y() + COUNTDOWN1_Y) * sy,
+                                      132 * sx, 14 * sy),
+                               Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                               format_countdown_dh(opencode.reset_week, now))
+                if opencode.reset_month is not None:
+                    p.drawText(QRectF((rects[1].x() + 14) * sx, (rects[1].y() + COUNTDOWN2_Y) * sy,
+                                      132 * sx, 14 * sy),
+                               Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                               format_countdown_dh(opencode.reset_month, now))
             p.setOpacity(1.0)
 
-        # 标题随各服务的额度环居中。
-        p.setFont(self._font(9))
-        font_metrics = p.fontMetrics()
-        p.setPen(QPen(COLOR_SUBTLE))
-        for idx, name in enumerate(SERVICE_KEYS):
-            panel_x, panel_y = panel_cells[idx]
-            panel_center = panel_x + SIDE_PANEL_WIDTH / 2
-            if idx < len(card_cells):
-                card_x, card_y = card_cells[idx]
-                center = _lerp(panel_center, card_x + CARD_CELL_SIZE / 2, t)
-                top = _lerp(panel_y + 8, card_y + 5, t)
+        # 迷你层标题（随 mini_alpha 淡入，锚点与主环一致）
+        if mini_alpha > 0.004:
+            p.setOpacity(mini_alpha)
+            cells = mini_cell_rects(self._card_orientation)
+            for name, cell in zip(("kimi", "opencode"), cells):
+                p.setPen(QPen(COLOR_SUBTLE))
+                p.setFont(cards_mod._card_font(9))
+                p.drawText(QRectF(cell.x(), cell.y() + 5, cell.width(), 14),
+                           Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                           SERVICE_TITLES[name])
+            p.setOpacity(1.0)
+
+    def _card_specs(self, now) -> dict:
+        """把三个服务的配额转成静态卡片渲染所需的纯文本数据（cards.py 消费）。
+
+        倒计时文字为动态层，不在此构建；错误状态只影响状态点与主显示颜色。
+        """
+        out = {}
+        for name in SERVICE_KEYS:
+            quota = self._quotas.get(name)
+            error = self._errors.get(name) or (self._last_error if name == "kimi" else "")
+            stale = bool(quota.stale) if quota is not None else False
+            spec = {
+                "title": SERVICE_TITLES[name],
+                "error": error,
+                "stale": stale,
+            }
+            if name == "deepseek":
+                spec["hero_kind"] = "balance"
+                spec["hero_label"] = "余额"
+                symbol = currency_symbol(quota.currency) if quota is not None else ""
+                if quota is not None and quota.balance is not None:
+                    spec["hero_amount"] = f"{symbol}{quota.balance}"
+                else:
+                    spec["hero_amount"] = "—"
+                avail = quota.is_available if quota is not None else None
+                if avail is not None:
+                    spec["status_dot_color"] = ("#4ac87e" if avail else "#ed5a52")
+                    spec["status_text"] = ("可用" if avail else "不可用")
+                    spec["status_text_color"] = spec["status_dot_color"]
+                topped = quota.topped_up_balance if quota is not None else None
+                granted = quota.granted_balance if quota is not None else None
+                spec["details"] = (
+                    ("充值余额", f"{symbol}{topped}" if topped is not None else "—", None),
+                    ("赠送余额", f"{symbol}{granted}" if granted is not None else "—", None),
+                )
             else:
-                if t >= 0.995:
-                    break
-                p.setOpacity(1.0 - t)
-                center = panel_center
-                top = panel_y + 8
-            title = SERVICE_TITLES[name]
-            title_width = font_metrics.horizontalAdvance(title) + 2
-            p.drawText(
-                QRectF(center - title_width / 2, top, title_width, 14),
-                Qt.AlignmentFlag.AlignCenter,
-                title,
-            )
+                spec["hero_kind"] = "ring"
+                spec["hero_label"] = "5小时"
+                if name == "kimi":
+                    month_total = quota.month_total_remaining if quota is not None else None
+                    month_code = quota.month_code_remaining if quota is not None else None
+                    spec["details"] = (
+                        ("月总额", f"{month_total:.0f}%" if month_total is not None else "", month_total),
+                        ("月代码", f"{month_code:.0f}%" if month_code is not None else "", month_code),
+                    )
+                else:
+                    week = quota.week_remaining if quota is not None else None
+                    month = quota.month_remaining if quota is not None else None
+                    spec["details"] = (
+                        ("每周", f"{week:.0f}%" if week is not None else "", week),
+                        ("每月", f"{month:.0f}%" if month is not None else "", month),
+                    )
+            out[name] = spec
+        return out
 
-    def _draw_kimi_extras(self, p: QPainter, quota, now):
-        self._draw_quota_details(
-            p, COL_X[0], quota, now,
-            (("月总额", quota.month_total_remaining if quota is not None else None),
-             ("月代码", quota.month_code_remaining if quota is not None else None)),
-        )
+    def _ring_anchors(self):
+        """当前帧 Kimi/OpenCode 圆环锚点（widget 坐标）。
 
-    def _draw_opencode_extras(self, p: QPainter, quota, now):
-        self._draw_quota_details(
-            p, COL_X[1], quota, now,
-            (("每周", quota.week_remaining if quota is not None else None),
-             ("每月", quota.month_remaining if quota is not None else None)),
-        )
-
-    def _draw_quota_details(self, p: QPainter, col_x, quota, now, rows):
-        reset_5h = quota.reset_5h if quota is not None else None
-        reset_month = quota.reset_month if quota is not None else None
-        align_center = Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
-        p.setPen(QPen(COLOR_SUBTLE))
-        p.setFont(self._font(9))
-        p.drawText(QRectF(col_x + 30, 76, 100, 14), align_center, "5小时")
-        p.drawText(QRectF(col_x + 30, 92, 100, 14), align_center, format_countdown(reset_5h, now))
-        for y, (label, remaining) in zip(DETAIL_ROW_Y, rows):
-            self._draw_quota_bar(p, col_x + 14, y, 132, label, remaining)
-        p.setPen(QPen(COLOR_SUBTLE))
-        p.drawText(QRectF(col_x + 14, 162, 132, 14), align_center,
-                   f"月重置 {format_countdown(reset_month, now)}")
-
-    def _draw_deepseek_column(self, p: QPainter, quota):
-        col_x = COL_X[2]
-        symbol = currency_symbol(quota.currency) if quota is not None else ""
-        balance = quota.balance if quota is not None else None
-        p.setPen(QPen(COLOR_TEXT if balance is not None else COLOR_GRAY))
-        p.setFont(self._font(16, bold=True))
-        big = f"{symbol}{balance}" if balance is not None else "—"
-        p.drawText(QRectF(col_x + 10, 40, 140, 30),
-                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, big)
-        p.setPen(QPen(COLOR_SUBTLE))
-        p.setFont(self._font(8))
-        p.drawText(QRectF(col_x + 10, 72, 140, 14),
-                   Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "余额")
-
-        rows = (
-            ("充值余额", quota.topped_up_balance if quota is not None else None),
-            ("赠送余额", quota.granted_balance if quota is not None else None),
-        )
-        for y, (label, amount) in zip(DETAIL_ROW_Y, rows):
-            self._draw_detail_row(p, col_x + 14, y, 132, label,
-                                  f"{symbol}{amount}" if amount is not None else "—")
-
-    def _draw_detail_row(self, p: QPainter, x, y, w, label, value):
-        p.setPen(QPen(COLOR_SUBTLE))
-        p.setFont(self._font(8))
-        p.drawText(QRectF(x, y, w * 0.6, 12),
-                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
-        p.drawText(QRectF(x, y, w, 12),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, value)
-
-    def _draw_quota_bar(self, p: QPainter, x, y, w, label, remaining):
-        value = f"{remaining:.0f}%" if remaining is not None else ""
-        self._draw_detail_row(p, x, y, w, label, value)
-        track_y = y + 13
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(COLOR_TRACK)
-        p.drawRoundedRect(QRectF(x, track_y, w, 5), 2.5, 2.5)
-        if remaining is not None:
-            fill_w = w * max(0.0, min(100.0, remaining)) / 100.0
-            if fill_w > 0:
-                p.setBrush(color_for_remaining(remaining))
-                p.drawRoundedRect(QRectF(x, track_y, fill_w, 5), 2.5, 2.5)
-
-    def _draw_double_ring(self, p: QPainter, cx, cy, t, remaining, timer_ratio, color):
-        """同心双环（Kimi/OpenCode 共用）：内环=剩余额度（阈值色），
-        外环=距 5h 重置倒计时（中性色，透明度=t 淡入）。timer_ratio 缺失时
-        外环只画轨道，不伪装成有效倒计时。"""
-        r_inner = _lerp(RING_RADIUS, CARD_QUOTA_RING_RADIUS, t)
-        r_outer = _lerp(PANEL_TIMER_RING_RADIUS, CARD_RING_RADIUS, t)
-        w_inner = _lerp(RING_THICKNESS, CARD_QUOTA_RING_WIDTH, t)
-        rect_inner = QRectF(cx - r_inner, cy - r_inner, 2 * r_inner, 2 * r_inner)
-        rect_outer = QRectF(cx - r_outer, cy - r_outer, 2 * r_outer, 2 * r_outer)
-
-        if t > 0.004:  # 外环（倒计时）：随收起淡入
-            p.save()
-            p.setOpacity(t)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(COLOR_TRACK, CARD_TIMER_RING_WIDTH,
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-            p.drawEllipse(rect_outer)
-            if timer_ratio is not None:
-                span = int(360 * 16 * timer_ratio)
-                if span > 0:
-                    p.setPen(QPen(COLOR_TIMER, CARD_TIMER_RING_WIDTH,
-                                  Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-                    p.drawArc(rect_outer, 90 * 16, -span)
-            p.restore()
-
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(COLOR_TRACK, w_inner, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-        p.drawEllipse(rect_inner)
-        if remaining is not None:
-            arc = int(360 * 16 * max(0.0, min(100.0, remaining)) / 100.0)
-            if arc > 0:
-                p.setPen(QPen(color, w_inner, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
-                p.drawArc(rect_inner, 90 * 16, -arc)
-
-        text = f"{remaining:.0f}%" if remaining is not None else "—"
-        hole = 2 * (r_inner - w_inner / 2.0) - 4
-        p.setFont(self._center_font(text, hole, _lerp(10.0, 9.0, t)))
-        p.setPen(QPen(color if remaining is not None else COLOR_GRAY))
-        p.drawText(rect_inner, Qt.AlignmentFlag.AlignCenter, text)
+        形变中按 _t 在面板锚点与迷你卡锚点间插值；静态时即当前方向的锚点。
+        """
+        panel_or = self._panel_orientation
+        card_or = self._card_orientation
+        if self._morph_state is not None:
+            start_or = _shape_orientation(self._morph_state.start_rect)
+            end_or = _shape_orientation(self._morph_state.end_rect)
+            if self._morph_state.target_t == 0.0:      # 展开：面板淡入(end)、卡淡出(start)
+                panel_or, card_or = end_or, start_or
+            else:                                       # 收起：面板淡出(start)、卡淡入(end)
+                panel_or, card_or = start_or, end_or
+        panel_anchors = panel_ring_anchors(panel_or)
+        card_anchors = mini_ring_anchors(card_or)
+        t = self._t
+        out = {}
+        for name in ("kimi", "opencode"):
+            px, py = panel_anchors[name]
+            cx2, cy2 = card_anchors[name]
+            out[name] = (_lerp(px, cx2, t), _lerp(py, cy2, t))
+        return out
 
     def _service_color(self, name: str) -> QColor:
         """主环颜色：阈值色；断线/无数据灰；5h 剩余 <10% 且开启提醒时闪烁。"""
         quota = self._quotas.get(name)
         if self._last_error or self._errors.get(name) or quota is None:
-            return QColor(COLOR_GRAY)
+            return QColor(cards_mod.COLOR_GRAY)
         remaining = quota.five_hour_remaining
         if remaining is None:
-            return QColor(COLOR_GRAY)
-        color = QColor(color_for_remaining(remaining))
+            return QColor(cards_mod.COLOR_GRAY)
+        color = QColor(cards_mod.color_for_remaining(remaining))
         if (
             self._blink_enabled
             and remaining < 10
@@ -833,25 +757,6 @@ class QuotaWidget(QWidget):
         ):
             color.setAlpha(70)
         return color
-
-    def _font(self, pt, bold: bool = False) -> QFont:
-        f = QFont()
-        f.setPointSizeF(float(pt))
-        f.setBold(bold)
-        return f
-    def _center_font(self, text: str, hole: float, base_pt: float = 10.0) -> QFont:
-        """环心数字自适应字号：宽度超过孔径就逐步缩小（下限 6pt），
-        避免 "100%" 这类宽文本压到同色弧线上被吞掉。"""
-        f = QFont()
-        f.setPointSizeF(base_pt)
-        f.setBold(True)
-        fm = QFontMetricsF(f)
-        size = base_pt
-        while size > 6.0 and fm.horizontalAdvance(text) > hole:
-            size = max(6.0, size - 0.5)
-            f.setPointSizeF(size)
-            fm = QFontMetricsF(f)
-        return f
 
     # ---- 交互 ----
 
@@ -884,10 +789,9 @@ class QuotaWidget(QWidget):
 
     def enterEvent(self, event):
         # 悬停迷你卡（或正在收回中）→ 反向滑出完整面板
-        self._auto_collapse.stop()
-        if self._snap_edge and self._drag_offset is None and self._morph_target != 0.0:
-            if self._t > 0.001 or self._morph_target == 1.0:
-                self._expand_from_edge(animated=True)
+        target_t = self._morph_state.target_t if self._morph_state is not None else None
+        if self._snap_edge and (self._t > 0.001 or target_t == 1.0):
+            self._expand_from_edge(animated=True)
 
     def leaveEvent(self, event):
         if self._snap_edge and self._t < 0.999:
@@ -895,71 +799,58 @@ class QuotaWidget(QWidget):
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        menu.addAction("立即刷新", lambda: self.refresh(force_all=True))
-        menu.addAction("取消贴边" if self._snap_edge else "贴边收起", self._toggle_snap)
+        act_refresh = menu.addAction("立即刷新")
+        act_snap = menu.addAction("取消贴边" if self._snap_edge else "贴边收起")
         act_blink = menu.addAction("低额度闪烁提醒")
         act_blink.setCheckable(True)
         act_blink.setChecked(self._blink_enabled)
-        act_blink.triggered.connect(self._toggle_blink)
         act_auto = menu.addAction("开机自启")
         act_auto.setCheckable(True)
         act_auto.setChecked(config.autostart_enabled())
-        act_auto.triggered.connect(self._toggle_autostart)
-        menu.addAction("设置…", lambda: QTimer.singleShot(0, self.show_settings))
-        menu.addAction("打开 OpenUsage 面板", lambda: webbrowser.open(self._cfg.get("server_url") or ""))
+        act_settings = menu.addAction("设置…")
+        act_open = menu.addAction("打开 OpenUsage 面板")
         menu.addSeparator()
-        menu.addAction("退出", QApplication.quit)
-        menu.aboutToHide.connect(self._on_menu_hidden)
-        menu.aboutToHide.connect(menu.deleteLater)
+        act_quit = menu.addAction("退出")
         self._menu_open = True
-        menu.popup(event.globalPos())
-
-    def _on_menu_hidden(self):
-        self._menu_open = False
-
-    def _toggle_snap(self):
-        if self._snap_edge:
-            self._unsnap()
+        try:
+            chosen = menu.exec(event.globalPos())
+        finally:
+            self._menu_open = False
+        if chosen is None:
             return
-        edge = self._nearest_edge(force=True)
-        if edge is not None:
-            self._snap(edge, animated=True)
-
-    def _toggle_blink(self, checked):
-        self._blink_enabled = checked
-        self._cfg["blink_enabled"] = checked
-        try:
-            config.save_config(self._cfg)
-        except config.ConfigError:
-            pass
-        self.update()
-
-    def _toggle_autostart(self, checked):
-        try:
-            config.set_autostart(checked)
-        except config.ConfigError as exc:
-            QMessageBox.warning(self, "开机自启", str(exc))
+        if chosen is act_refresh:
+            self.refresh(force_all=True)  # 手动刷新：全量 force 覆盖三个服务
+        elif chosen is act_snap:
+            if self._snap_edge:
+                self._unsnap()
+            else:
+                edge = self._nearest_edge(force=True)
+                if edge is not None:
+                    self._snap(edge, animated=True)
+        elif chosen is act_blink:
+            self._blink_enabled = act_blink.isChecked()
+            self._cfg["blink_enabled"] = self._blink_enabled
+            try:
+                config.save_config(self._cfg)
+            except config.ConfigError:
+                pass
+            self.update()
+        elif chosen is act_auto:
+            try:
+                config.set_autostart(act_auto.isChecked())
+            except config.ConfigError as exc:
+                act_auto.setChecked(not act_auto.isChecked())
+                QMessageBox.warning(self, "开机自启", str(exc))
+        elif chosen is act_settings:
+            self.show_settings()
+        elif chosen is act_open:
+            webbrowser.open(self._cfg.get("server_url") or "")
+        elif chosen is act_quit:
+            QApplication.quit()
 
     def show_settings(self):
-        if self._settings_dialog is not None:
-            self._settings_dialog.raise_()
-            self._settings_dialog.activateWindow()
-            return
         dlg = SettingsDialog(self._cfg)
-        self._settings_dialog = dlg
-        dlg.finished.connect(self._finish_settings)
-        dlg.adjustSize()
-        available = self.screen().availableGeometry()
-        dlg.move(available.center() - dlg.rect().center())
-        dlg.show()
-        dlg.raise_()
-        dlg.activateWindow()
-
-    def _finish_settings(self, result):
-        dlg = self._settings_dialog
-        self._settings_dialog = None
-        dlg.deleteLater()
-        if result != QDialog.DialogCode.Accepted:
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         server, username, password = dlg.values()
         if not server or not username:
@@ -990,7 +881,7 @@ class QuotaWidget(QWidget):
             return
         self._client = self._make_client()  # 新作用域无 token → 强制重新登录
         self._quotas = {n: None for n in SERVICE_KEYS}
-        self._quota = None
+        self._render_cache.invalidate()
         self.update()
         self.refresh()
 
