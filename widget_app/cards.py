@@ -94,17 +94,12 @@ def draw_card_chrome(p, rect):
                              rect.width() - 1.0, rect.height() - 1.0), 10, 10)
 
 
-def draw_title(p, rect, title, dot_color):
-    """标题行：服务名（左）+ 状态点（右）。"""
+def draw_title(p, rect, title):
+    """标题行：服务名（居中，三卡统一）。"""
     p.setPen(QPen(COLOR_TEXT))
     p.setFont(_card_font(9, bold=True))
-    p.drawText(QRectF(rect.x() + 10, rect.y() + TITLE_Y, rect.width() - 40, 14),
-               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
-    if dot_color is not None:
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(dot_color)
-        p.drawEllipse(QRectF(rect.x() + rect.width() - 22,
-                             rect.y() + TITLE_Y + 3, 7, 7))
+    p.drawText(QRectF(rect.x(), rect.y() + TITLE_Y, rect.width(), 14),
+               Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, title)
 
 
 def draw_double_ring(p, cx, cy, r_inner, r_outer, w_inner, remaining,
@@ -190,7 +185,7 @@ def draw_service_card(p, rect, spec):
     主环与环心数字、倒计时文字为动态层，不在此绘制。
     """
     draw_card_chrome(p, rect)
-    draw_title(p, rect, spec.get("title") or "", spec.get("status_dot_color"))
+    draw_title(p, rect, spec.get("title") or "")
 
     hero_cx = rect.x() + rect.width() / 2
     hero_cy = rect.y() + HERO_CY
@@ -204,8 +199,10 @@ def draw_service_card(p, rect, spec):
     p.drawText(QRectF(rect.x() + 10, rect.y() + HERO_LABEL_Y, rect.width() - 20, 12),
                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, hero_label)
 
-    # 主状态行：余额类为静态（● 可用/不可用）；环形类是 5h 倒计时（动态层）
-    if spec.get("hero_kind") == "balance" and spec.get("status_text"):
+    # 主状态行：余额类仅在不可用时给红色提示（可用时不加装饰）；
+    # 环形类该位置是 5h 倒计时（动态层）
+    if (spec.get("hero_kind") == "balance"
+            and spec.get("status_text") == "不可用"):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(spec.get("status_dot_color") or "#94a1a2"))
         p.drawEllipse(QRectF(hero_cx - 26, rect.y() + STATUS_Y + 2, 7, 7))
