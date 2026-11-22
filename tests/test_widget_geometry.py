@@ -26,11 +26,12 @@ from widget_app.quota import (
 )
 from widget_app.widget import (
     BLINK_HALF_PERIOD_MS,
-    CARD_HEIGHT,
-    CARD_WIDTH,
+    CARD_CELL_SIZE,
     COLOR_GRAY,
     COLOR_GREEN,
     HEIGHT,
+    SIDE_PANEL_HEIGHT,
+    SIDE_PANEL_WIDTH,
     WIDTH,
     QuotaWidget,
     edge_rect,
@@ -41,14 +42,14 @@ GEO = QRect(0, 0, 2560, 1400)  # 可用区域：bottom=1399, right=2559
 
 class TestEdgeRect(unittest.TestCase):
     def test_top_collapsed_card(self):
-        self.assertEqual(edge_rect("top", False, 100, GEO), QRect(100, 0, CARD_WIDTH, CARD_HEIGHT))
+        self.assertEqual(edge_rect("top", False, 100, GEO), QRect(100, 0, 2 * CARD_CELL_SIZE, CARD_CELL_SIZE))
 
     def test_top_expanded_panel(self):
         self.assertEqual(edge_rect("top", True, 100, GEO), QRect(100, 0, WIDTH, HEIGHT))
 
     def test_bottom_collapsed_card_hugs_bottom(self):
         r = edge_rect("bottom", False, 100, GEO)
-        self.assertEqual(r, QRect(100, 1399 - CARD_HEIGHT + 1, CARD_WIDTH, CARD_HEIGHT))
+        self.assertEqual(r, QRect(100, GEO.bottom() - CARD_CELL_SIZE + 1, 2 * CARD_CELL_SIZE, CARD_CELL_SIZE))
         self.assertEqual(r.bottom(), GEO.bottom())
 
     def test_bottom_expanded_panel(self):
@@ -57,17 +58,22 @@ class TestEdgeRect(unittest.TestCase):
         self.assertEqual(r.height(), HEIGHT)
 
     def test_left_collapsed_card(self):
-        self.assertEqual(edge_rect("left", False, 100, GEO), QRect(0, 100, CARD_WIDTH, CARD_HEIGHT))
+        self.assertEqual(edge_rect("left", False, 100, GEO), QRect(0, 100, CARD_CELL_SIZE, 2 * CARD_CELL_SIZE))
 
     def test_right_collapsed_card_hugs_right(self):
         r = edge_rect("right", False, 100, GEO)
         self.assertEqual(r.right(), GEO.right())
-        self.assertEqual(r, QRect(2559 - CARD_WIDTH + 1, 100, CARD_WIDTH, CARD_HEIGHT))
+        self.assertEqual(r, QRect(GEO.right() - CARD_CELL_SIZE + 1, 100, CARD_CELL_SIZE, 2 * CARD_CELL_SIZE))
 
     def test_right_expanded_panel(self):
         r = edge_rect("right", True, 100, GEO)
         self.assertEqual(r.right(), GEO.right())
-        self.assertEqual(r.width(), WIDTH)
+        self.assertEqual(r.width(), SIDE_PANEL_WIDTH)
+        self.assertEqual(r.height(), SIDE_PANEL_HEIGHT)
+
+    def test_left_expanded_panel_fits_short_screen(self):
+        screen = QRect(0, 0, 800, 480)
+        self.assertEqual(edge_rect("left", True, 100, screen), QRect(0, 0, SIDE_PANEL_WIDTH, screen.height()))
 
     def test_along_clamped_inside_screen(self):
         self.assertEqual(edge_rect("top", False, -50, GEO).left(), 0)
