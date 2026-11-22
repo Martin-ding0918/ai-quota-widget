@@ -1,8 +1,7 @@
 """配置与凭据。
 
-- config.json 存在 %APPDATA%\\kimi-quota-widget\\（不在同步目录里，遵守红线 5：
-  敏感信息不进同步目录），保存服务器地址、用户名、token（按「规范化源地址|用户名」
-  分桶）、窗口位置、贴边状态。
+- config.json 存在 %APPDATA%\\kimi-quota-widget\\，保存连接地址、用户名、窗口位置、
+  贴边状态和按帐户隔离的服务选择。
 - 密码存 Windows 凭据管理器（keyring），键按「规范化源地址|用户名」绑定——更换
   服务器或用户名后不会复用旧密码；历史版本仅按用户名保存的密码不自动迁移，由
   用户重新输入（保存时顺带清理旧条目）。
@@ -14,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -41,6 +41,8 @@ DEFAULTS = {
     "window_y": None,
     "snap_edge": "",        # 贴边收起："" | top | bottom | left | right
     "blink_enabled": True,  # 低额度（5h 剩余 <10%）时收起卡闪烁提醒
+    "service_preferences": {},
+    "legacy_service_scope": "",
 }
 
 # 会话 token 存 Windows 凭据管理器（与密码同一服务族、独立子键），
@@ -62,13 +64,15 @@ def normalize_origin(server_url: str) -> str:
         text = "http://" + text  # 裸 "host:port"（urlsplit 会整体当路径）
     try:
         parts = urlsplit(text)
+        port = parts.port
     except ValueError:
         return ""
     scheme = (parts.scheme or "http").lower()
     host = (parts.hostname or "").strip().lower()
-    if not host:
+    if not host or scheme not in ("http", "https") or parts.username is not None:
         return ""
-    port = parts.port
+    if ":" in host:
+        host = f"[{host}]"
     if port and port != {"http": 80, "https": 443}.get(scheme):
         return f"{scheme}://{host}:{port}"
     return f"{scheme}://{host}"
@@ -93,6 +97,12 @@ def load_config() -> dict:
     for k in DEFAULTS:
         if k in raw:
             cfg[k] = raw[k]
+    for key in ("server_url", "username", "legacy_service_scope"):
+        if not isinstance(cfg[key], str):
+            cfg[key] = DEFAULTS[key]
+    if "service_preferences" not in raw and isinstance(raw.get("username"), str) and raw["username"]:
+        cfg["legacy_service_scope"] = credential_scope(cfg["server_url"], raw["username"])
+    cfg["service_preferences"] = _clean_preferences(cfg["service_preferences"])
     # 旧版遗留（迁移源，migrate_tokens_to_keyring 处理后清除）：
     # raw["token"] = v1.0.1 及之前的单 token 字段；raw["tokens"] = v1.0.2 的分桶
     cfg["token"] = raw.get("token") or ""
@@ -100,6 +110,24 @@ def load_config() -> dict:
     if not isinstance(cfg["legacy_tokens"], dict):
         cfg["legacy_tokens"] = {}
     return cfg
+
+
+def _clean_preferences(value):
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for scope, preference in value.items():
+        if not isinstance(scope, str) or not isinstance(preference, dict):
+            continue
+        entry = {}
+        for key in ("panel_ids", "mini_ids"):
+            ids = preference.get(key)
+            if isinstance(ids, list):
+                entry[key] = list(dict.fromkeys(i for i in ids if type(i) is int and i > 0))
+                if key == "mini_ids":
+                    entry[key] = entry[key][:2]
+        out[scope] = entry
+    return out
 
 
 def migrate_tokens_to_keyring(cfg: dict) -> bool:
@@ -141,12 +169,23 @@ def migrate_tokens_to_keyring(cfg: dict) -> bool:
 
 
 def save_config(cfg: dict) -> None:
+    temporary = None
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         payload = {k: cfg.get(k, DEFAULTS.get(k)) for k in DEFAULTS}
-        CONFIG_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=CONFIG_PATH.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+        temporary.replace(CONFIG_PATH)
+        temporary = None
     except OSError as exc:
         raise ConfigError(f"写入配置失败：{exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def get_stored_token(cfg: dict, server_url: str, username: str) -> str:

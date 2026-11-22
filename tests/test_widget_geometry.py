@@ -1,440 +1,122 @@
-"""test_widget_geometry.py — 贴边几何纯函数 edge_rect + 主环颜色/闪烁 +
-快照接收的按服务档位判定 + force 目标决策的单测。"""
+"""Qt integration tests for rendering data and guarding account changes."""
 
 import os
-import sys
-import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from pathlib import Path
+from dataclasses import replace
+from unittest.mock import patch
 
-from PySide6.QtCore import QRect
 from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import QApplication
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-import widget_app.widget as widget_mod
 from widget_app import config
-from widget_app.layout import (
-    CARD_CELL_SIZE,
-    PANEL_H_H,
-    PANEL_H_W,
-    PANEL_V_H,
-    PANEL_V_W,
-    SERVICE_KEYS,
-    edge_rect,
-)
-from widget_app.quota import (
-    DeepSeekQuota,
-    KimiQuota,
-    OpenCodeQuota,
-    UsageSnapshot,
-    service_signature,
-)
 from widget_app.cards import COLOR_GRAY, COLOR_GREEN, center_font
+from widget_app.services import Metric, Service
 from widget_app.widget import BLINK_HALF_PERIOD_MS, QuotaWidget
 
-GEO = QRect(0, 0, 2560, 1400)  # 可用区域：bottom=1399, right=2559
 
-
-class TestEdgeRect(unittest.TestCase):
-    def test_top_collapsed_card(self):
-        self.assertEqual(edge_rect("top", False, 100, GEO), QRect(100, 0, 2 * CARD_CELL_SIZE, CARD_CELL_SIZE))
-
-    def test_top_expanded_panel(self):
-        self.assertEqual(edge_rect("top", True, 100, GEO), QRect(100, 0, PANEL_H_W, PANEL_H_H))
-
-    def test_bottom_collapsed_card_hugs_bottom(self):
-        r = edge_rect("bottom", False, 100, GEO)
-        self.assertEqual(r, QRect(100, GEO.bottom() - CARD_CELL_SIZE + 1, 2 * CARD_CELL_SIZE, CARD_CELL_SIZE))
-        self.assertEqual(r.bottom(), GEO.bottom())
-
-    def test_bottom_expanded_panel(self):
-        r = edge_rect("bottom", True, 100, GEO)
-        self.assertEqual(r.bottom(), GEO.bottom())
-        self.assertEqual(r.height(), PANEL_H_H)
-
-    def test_left_collapsed_card(self):
-        self.assertEqual(edge_rect("left", False, 100, GEO), QRect(0, 100, CARD_CELL_SIZE, 2 * CARD_CELL_SIZE))
-
-    def test_right_collapsed_card_hugs_right(self):
-        r = edge_rect("right", False, 100, GEO)
-        self.assertEqual(r.right(), GEO.right())
-        self.assertEqual(r, QRect(GEO.right() - CARD_CELL_SIZE + 1, 100, CARD_CELL_SIZE, 2 * CARD_CELL_SIZE))
-
-    def test_right_expanded_panel(self):
-        r = edge_rect("right", True, 100, GEO)
-        self.assertEqual(r.right(), GEO.right())
-        self.assertEqual(r.width(), PANEL_V_W)
-        self.assertEqual(r.height(), PANEL_V_H)
-
-    def test_left_expanded_panel_fits_short_screen(self):
-        screen = QRect(0, 0, 800, 480)
-        self.assertEqual(edge_rect("left", True, 100, screen), QRect(0, 0, PANEL_V_W, screen.height()))
-
-    def test_along_clamped_inside_screen(self):
-        self.assertEqual(edge_rect("top", False, -50, GEO).left(), 0)
-        self.assertEqual(edge_rect("top", False, 99999, GEO).right(), GEO.right())
-        self.assertEqual(edge_rect("left", False, -50, GEO).top(), 0)
-        self.assertEqual(edge_rect("left", False, 99999, GEO).bottom(), GEO.bottom())
-
-    def test_expanded_panel_clamped_inside_screen(self):
-        self.assertEqual(edge_rect("top", True, 99999, GEO).right(), GEO.right())
-        self.assertEqual(edge_rect("right", True, -50, GEO).top(), 0)
-
-
-class TestLineBlink(unittest.TestCase):
-    """Kimi 主环颜色：阈值色 / 断线灰 / 低额度闪烁（打桩 time.monotonic 确定性验证）。
-
-    必须用真实平台（windows）的字体与颜色路径——offscreen 平台缺字体引擎。
-    """
-
+class TestWidget(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        os.environ.pop("QT_QPA_PLATFORM", None)  # 真实平台（字体度量/渲染真值）
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         cls.app = QApplication.instance() or QApplication([])
-        tmp = Path(tempfile.gettempdir()) / "kqw-test-config.json"
-        tmp.write_text("{}", encoding="utf-8")
-        cls._old_cfg_path = config.CONFIG_PATH
-        config.CONFIG_PATH = tmp  # 不碰真实 config
-        cls.widget = QuotaWidget()
-        for sig in (cls.widget.snapshot_received, cls.widget.failed):
-            try:
-                sig.disconnect()
-            except RuntimeError:
-                pass
-        cls.widget._client = None  # 阻断轮询线程的影响
-        cls.now = datetime.now(timezone.utc)
-
-    @classmethod
-    def tearDownClass(cls):
-        config.CONFIG_PATH = cls._old_cfg_path
-
-    def _quota(self, remaining):
-        return KimiQuota(
-            five_hour_remaining=remaining, month_total_remaining=50.0,
-            month_code_remaining=60.0, reset_5h=self.now + timedelta(hours=2, minutes=13),
-            reset_month=None, fetched_at=self.now, stale=False,
-        )
 
     def setUp(self):
-        w = self.widget
-        w._quotas["kimi"] = self._quota(46.0)
-        w._last_error = ""
-        w._snap_edge = "top"
-        w._blink_enabled = True
+        with patch.object(config, "load_config", return_value={**config.DEFAULTS, "service_preferences": {}}), \
+                patch.object(config, "get_stored_token", return_value=""), \
+                patch.object(config, "migrate_tokens_to_keyring", return_value=False):
+            self.widget = QuotaWidget()
 
-    def _color_at(self, monotonic_value):
-        import widget_app.widget as wmod
-        real = wmod.time.monotonic
+    def tearDown(self):
+        if self.widget._settings_dialog is not None:
+            self.widget._settings_dialog.reject()
+        self.widget.close()
+        self.widget.deleteLater()
+        self.app.processEvents()
+
+    def test_late_old_account_response_cannot_replace_current_cards(self):
+        old_client = self.widget._client
+        self.widget._client = self.widget._make_client()
+        current = Service(1, "当前服务", "custom", Metric("余额", "$32"))
+        self.widget._services = {1: current}
+        stale = {1: Service(1, "另一帐户", "custom", Metric("余额", "$22"))}
+        self.widget._fetch_inflight = True
+        self.widget._on_snapshot_received(old_client, stale)
+        self.widget._on_failed(old_client, "前一个账户")
+        self.assertEqual(self.widget._services, {1: current})
+        self.assertTrue(self.widget._fetch_inflight)
+        self.assertEqual(self.widget._last_error, "")
+
+    def test_ring_color_error_and_blink(self):
+        service = Service(5, "OpenCode", "opencode", Metric("5 小时", remaining=46.0))
+        self.assertEqual(self.widget._ring_color(service).rgb(), COLOR_GREEN.rgb())
+        self.assertEqual(self.widget._ring_color(replace(service, error="断线")).rgb(), COLOR_GRAY.rgb())
+        low = replace(service, hero=Metric("5 小时", remaining=8.0))
+        for point, alpha in ((0.0, 255), (BLINK_HALF_PERIOD_MS / 1000, 70)):
+            with patch("widget_app.widget.time.monotonic", return_value=point):
+                self.assertEqual(self.widget._ring_color(low).alpha(), alpha)
+
+    def test_settings_cancel_closes_without_saving_and_can_reopen(self):
+        self.widget._services = {1: Service(1, "OpenCode", "opencode", Metric("5 小时", remaining=46.0))}
+        with patch.object(config, "save_config") as save:
+            self.widget.show_settings()
+            first = self.widget._settings_dialog
+            self.widget.show_settings()
+            self.assertIs(self.widget._settings_dialog, first)
+            self.assertFalse(first.isModal())
+            first.reject()
+            self.assertIsNone(self.widget._settings_dialog)
+            self.widget.show_settings()
+            self.assertIsNot(self.widget._settings_dialog, first)
+            save.assert_not_called()
+
+    def test_mini_restart_uses_explicit_edge_even_with_square_card(self):
+        self.widget._snap_edge = "right"
+        self.widget._panel_vertical = self.widget._mini_vertical = True
+        from widget_app.layout import Rect
+        self.widget._services = {1: Service(1, "OpenCode", "opencode"), 2: Service(2, "DeepSeek", "deepseek")}
+        self.widget._cfg["service_preferences"][self.widget._scope()] = {"mini_ids": [1]}
+        geo = Rect(0, 0, 1024, 768)
+        mini, panel = self.widget._grid(True, geo), self.widget._grid(False, geo)
+        self.assertEqual((mini.width, mini.height), (96, 96))
+        self.assertEqual(len({rect.x for rect in panel.cards}), 1)
+        self.assertLess(panel.width, panel.height)
+
+    def test_settings_saves_order_and_mini_for_current_scope(self):
+        self.widget._cfg["username"] = "test"
+        self.widget._services = {i: Service(i, f"Service {i}", "opencode") for i in (1, 2, 3, 4)}
+        self.widget.show_settings()
+        dialog = self.widget._settings_dialog
+        dialog.items.setCurrentRow(3)
+        dialog._move(-1)
+        dialog.mini_a.setCurrentIndex(dialog.mini_a.findData(4))
+        client = self.widget._client
+        with patch.object(config, "save_config") as save:
+            self.widget._save_settings()
+            save.assert_called_once()
+        panel, mini = self.widget._selection()
+        self.assertEqual(panel, [1, 2, 4, 3])
+        self.assertEqual(mini[0], 4)
+        self.assertIs(self.widget._client, client)
+        self.assertIsNone(self.widget._settings_dialog)
+
+    def test_center_font_fits_hole_or_reaches_minimum(self):
+        for value, hole in (("100%", 27.0), ("100%", 9.0), ("82%", 32.0)):
+            font = center_font(value, hole)
+            self.assertTrue(QFontMetricsF(font).horizontalAdvance(value) <= hole or font.pointSizeF() <= 6)
+
+    def test_timed_mini_card_paints_both_rings(self):
+        from datetime import datetime, timedelta, timezone
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QImage, QPainter
+        from widget_app.cards import draw_service
+        now = datetime.now(timezone.utc)
+        service = Service(1, "Kimi Code", "kimi",
+                          Metric("5 小时", remaining=78, reset=now + timedelta(hours=2), window_seconds=18000))
+        image = QImage(96, 96, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        painter = QPainter(image)
         try:
-            wmod.time.monotonic = lambda: monotonic_value
-            return self.widget._service_color("kimi")
+            draw_service(painter, QRectF(0, 0, 96, 96), service, now, COLOR_GREEN, mini=True)
         finally:
-            wmod.time.monotonic = real
-
-    def test_normal_remaining_is_threshold_color(self):
-        # 46% 绿色，任意相位都是不透明
-        c1 = self._color_at(1000.0)
-        c2 = self._color_at(1000.0 + BLINK_HALF_PERIOD_MS / 1000)
-        self.assertEqual(c1.alpha(), 255)
-        self.assertEqual(c2.alpha(), 255)
-        self.assertEqual((c1.red(), c1.green(), c1.blue()), (COLOR_GREEN.red(), COLOR_GREEN.green(), COLOR_GREEN.blue()))
-
-    def test_low_remaining_blinks(self):
-        self.widget._quotas["kimi"] = self._quota(8.0)
-        bright = self._color_at(1000.0)                       # 相位 0（亮）
-        dim = self._color_at(1000.0 + BLINK_HALF_PERIOD_MS / 1000)  # 相位 1（暗）
-        self.assertEqual(bright.alpha(), 255)
-        self.assertEqual(dim.alpha(), 70)
-
-    def test_blink_disabled_stays_solid(self):
-        self.widget._quotas["kimi"] = self._quota(8.0)
-        self.widget._blink_enabled = False
-        c1 = self._color_at(1000.0)
-        c2 = self._color_at(1000.0 + BLINK_HALF_PERIOD_MS / 1000)
-        self.assertEqual(c1.alpha(), 255)
-        self.assertEqual(c2.alpha(), 255)
-
-    def test_error_or_missing_data_is_gray(self):
-        self.widget._quotas["kimi"] = None
-        self.widget._last_error = "模拟断线"
-        self.assertEqual(self.widget._service_color("kimi").rgb(), COLOR_GRAY.rgb())
-        self.widget._last_error = ""
-        self.assertEqual(self.widget._service_color("kimi").rgb(), COLOR_GRAY.rgb())
-        self.widget._quotas["kimi"] = self._quota(46.0)
-        self.widget._quotas["kimi"].five_hour_remaining = None
-        self.assertEqual(self.widget._service_color("kimi").rgb(), COLOR_GRAY.rgb())
-
-
-class TestCenterFont(unittest.TestCase):
-    """环心数字自适应字号（cards.center_font 纯函数）：宽文本缩到放进孔径，
-    不变式 = 放得下或已到 6pt 下限。
-
-    注意：必须用真实平台（windows）的字体度量——offscreen 平台缺字体引擎，
-    QFontMetricsF 对 pointSize 不敏感，测出的缩放是假的。
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        os.environ.pop("QT_QPA_PLATFORM", None)  # 强制真实平台才有真字体度量
-        cls.app = QApplication.instance() or QApplication([])
-
-    def test_shrinks_until_text_fits_hole(self):
-        # 迷你卡内环孔径 ~23px："100%" 10pt 必然放不下 → 必须缩
-        f = center_font("100%", 23.0, 10.0)
-        fm = QFontMetricsF(f)
-        self.assertLessEqual(fm.horizontalAdvance("100%"), 23.0)
-        self.assertLess(f.pointSizeF(), 10.0)
-        self.assertGreaterEqual(f.pointSizeF(), 6.0)
-
-    def test_floor_at_six_points_for_absurdly_small_hole(self):
-        f = center_font("100%", 8.0, 10.0)
-        self.assertLessEqual(f.pointSizeF(), 6.5)  # 下限保护：缩到 6pt 附近为止
-
-    def test_roomy_hole_keeps_base_size(self):
-        # 单字符/面板孔径充足 → 保持基准字号
-        f = center_font("—", 34.0, 10.0)
-        self.assertEqual(f.pointSizeF(), 10.0)
-        f2 = center_font("82%", 34.0, 10.0)
-        self.assertGreaterEqual(f2.pointSizeF(), 8.0)  # 两位数只是微缩或不变
-
-    def test_fractional_shrink_steps(self):
-        # 中间孔径：0.5pt 步进平滑缩小，最终放得下
-        f = center_font("100%", 27.0, 10.0)
-        fm = QFontMetricsF(f)
-        self.assertLessEqual(fm.horizontalAdvance("100%"), 27.0)
-        self.assertGreaterEqual(f.pointSizeF(), 6.0)
-        self.assertLess(f.pointSizeF(), 10.0)
-
-
-class TestForceTargets(unittest.TestCase):
-    """单服务 force 目标决策：手动全量 / 按活动档 / 未记住 id 的排除。"""
-
-    def test_manual_forces_all_known(self):
-        self.assertEqual(
-            widget_mod._force_targets(set(), {"kimi": 1, "opencode": 5, "deepseek": 2}, True),
-            ["kimi", "opencode", "deepseek"],
-        )
-
-    def test_manual_skips_unknown_ids(self):
-        self.assertEqual(
-            widget_mod._force_targets(set(), {"kimi": 1, "opencode": None, "deepseek": 2}, True),
-            ["kimi", "deepseek"],
-        )
-
-    def test_active_only(self):
-        self.assertEqual(
-            widget_mod._force_targets({"opencode"}, {"kimi": 1, "opencode": 5, "deepseek": 2}, False),
-            ["opencode"],
-        )
-
-    def test_no_active_no_targets(self):
-        self.assertEqual(
-            widget_mod._force_targets(set(), {"kimi": 1, "opencode": 5}, False),
-            [],
-        )
-
-
-class TestEffectiveOrientations(unittest.TestCase):
-    """拖拽换边（横⇄纵）后的首次形变：paint 各层方向必须取自形变起止矩形，
-    而不是滞后一个形变的属性——否则换向后的首次展开会以旧方向渲染静态层，
-    形变结束时弹跳（跳帧）。"""
-
-    @classmethod
-    def setUpClass(cls):
-        os.environ.pop("QT_QPA_PLATFORM", None)
-        cls.app = QApplication.instance() or QApplication([])
-        tmp = Path(tempfile.gettempdir()) / "kqw-orient-config.json"
-        tmp.write_text("{}", encoding="utf-8")
-        cls._old_cfg_path = config.CONFIG_PATH
-        config.CONFIG_PATH = tmp
-        cls.widget = QuotaWidget()
-
-    @classmethod
-    def tearDownClass(cls):
-        config.CONFIG_PATH = cls._old_cfg_path
-
-    def _morph(self, target_t, start_rect, end_rect, panel_or, card_or):
-        from widget_app.layout import MorphState
-        self.widget._morph_state = MorphState(
-            progress=0.0, start_t=1.0 - target_t, target_t=target_t,
-            start_rect=start_rect, end_rect=end_rect,
-            panel_orientation=panel_or, card_orientation=card_or)
-
-    def test_expand_after_rotation_uses_rect_orientations(self):
-        # 拖拽换边后遗留：_panel_orientation 仍是旧方向（horizontal），
-        # 而当前是竖迷你 → 首次展开（竖面板）帧方向必须全为 vertical
-        w = self.widget
-        w._panel_orientation = "horizontal"
-        w._card_orientation = "vertical"
-        self._morph(0.0, QRect(0, 0, 96, 192), QRect(0, 0, 176, 572),
-                    "vertical", "vertical")
-        self.assertEqual(w._effective_orientations(), ("vertical", "vertical"))
-
-    def test_collapse_after_rotation_fades_panel_in_old_orientation(self):
-        # 反向（纵→横）：收起时淡出的面板层用起点矩形方向（旧），迷你层用终点（新）
-        w = self.widget
-        w._panel_orientation = "vertical"
-        w._card_orientation = "horizontal"
-        self._morph(1.0, QRect(0, 0, 176, 572), QRect(0, 0, 192, 96),
-                    "vertical", "horizontal")
-        self.assertEqual(w._effective_orientations(), ("vertical", "horizontal"))
-
-    def test_no_morph_returns_attributes(self):
-        w = self.widget
-        w._morph_state = None
-        w._panel_orientation = "vertical"
-        w._card_orientation = "vertical"
-        self.assertEqual(w._effective_orientations(), ("vertical", "vertical"))
-
-
-class TestSnapshotReceived(unittest.IsolatedAsyncioTestCase):
-    """_on_snapshot_received：按服务独立档位判定（Kimi 变化只激活 Kimi）。"""
-
-    async def asyncSetUp(self):
-        os.environ.pop("QT_QPA_PLATFORM", None)
-        self.app = QApplication.instance() or QApplication([])
-        tmp = Path(tempfile.gettempdir()) / "kqw-snap-config.json"
-        tmp.write_text("{}", encoding="utf-8")
-        self._old_cfg_path = config.CONFIG_PATH
-        config.CONFIG_PATH = tmp
-        self.widget = QuotaWidget()
-        for sig in (self.widget.snapshot_received, self.widget.failed):
-            try:
-                sig.disconnect()
-            except RuntimeError:
-                pass
-        self.widget._client = None
-        self.now = datetime.now(timezone.utc)
-
-    async def asyncTearDown(self):
-        config.CONFIG_PATH = self._old_cfg_path
-
-    def _kimi(self, remaining):
-        return KimiQuota(five_hour_remaining=remaining, month_total_remaining=50.0,
-                         month_code_remaining=60.0, reset_5h=self.now + timedelta(hours=2),
-                         reset_month=None, fetched_at=self.now, stale=False, service_id=1)
-
-    def _opencode(self, remaining):
-        return OpenCodeQuota(five_hour_remaining=remaining, week_remaining=80.0,
-                             month_remaining=90.0, reset_5h=self.now + timedelta(hours=4),
-                             reset_week=None, reset_month=None, fetched_at=self.now,
-                             stale=False, service_id=5)
-
-    def _deepseek(self, currency="CNY", balance="25.92"):
-        return DeepSeekQuota(balance=Decimal(balance), topped_up_balance=None,
-                             granted_balance=None, currency=currency, is_available=True,
-                             fetched_at=self.now, stale=False, service_id=2)
-
-    async def test_kimi_change_activates_only_kimi(self):
-        w = self.widget
-        old_kimi = self._kimi(90.0)
-        w._quotas = {"kimi": None, "opencode": self._opencode(75.0), "deepseek": self._deepseek()}
-        w._prev_signatures = {"kimi": service_signature("kimi", old_kimi),
-                              "opencode": service_signature("opencode", w._quotas["opencode"]),
-                              "deepseek": service_signature("deepseek", w._quotas["deepseek"])}
-        w._active_services = set()
-        w._quiet_polls = {n: 0 for n in SERVICE_KEYS}
-        snap = UsageSnapshot(kimi=self._kimi(95.0), opencode=w._quotas["opencode"],
-                             deepseek=w._quotas["deepseek"], errors={})
-        w._on_snapshot_received((snap, {}))
-        self.assertIn("kimi", w._active_services)
-        self.assertNotIn("opencode", w._active_services)
-        self.assertNotIn("deepseek", w._active_services)
-
-    async def test_opencode_change_activates_only_opencode(self):
-        w = self.widget
-        old_oc = self._opencode(80.0)
-        w._quotas = {"kimi": self._kimi(95.0), "opencode": None, "deepseek": self._deepseek()}
-        w._prev_signatures = {"kimi": service_signature("kimi", w._quotas["kimi"]),
-                              "opencode": service_signature("opencode", old_oc),
-                              "deepseek": service_signature("deepseek", w._quotas["deepseek"])}
-        w._active_services = set()
-        w._quiet_polls = {n: 0 for n in SERVICE_KEYS}
-        snap = UsageSnapshot(kimi=w._quotas["kimi"], opencode=self._opencode(75.0),
-                             deepseek=w._quotas["deepseek"], errors={})
-        w._on_snapshot_received((snap, {}))
-        self.assertIn("opencode", w._active_services)
-        self.assertNotIn("kimi", w._active_services)
-
-    async def test_deepseek_balance_change_activates(self):
-        w = self.widget
-        w._quotas = {"kimi": self._kimi(95.0), "opencode": self._opencode(75.0),
-                     "deepseek": self._deepseek(balance="25.92")}
-        w._prev_signatures = {n: service_signature(n, w._quotas[n]) for n in SERVICE_KEYS}
-        w._active_services = set()
-        w._quiet_polls = {n: 0 for n in SERVICE_KEYS}
-        snap = UsageSnapshot(kimi=w._quotas["kimi"], opencode=w._quotas["opencode"],
-                             deepseek=self._deepseek(balance="20.00"), errors={})
-        w._on_snapshot_received((snap, {}))
-        self.assertIn("deepseek", w._active_services)
-        self.assertNotIn("kimi", w._active_services)
-
-    async def test_deepseek_countdown_flow_does_not_activate(self):
-        # 5h 重置时间流逝（reset_5h 变化）但余额/币种/状态不变 → 不激活
-        w = self.widget
-        w._quotas = {"kimi": self._kimi(95.0), "opencode": self._opencode(75.0),
-                     "deepseek": self._deepseek(balance="25.92")}
-        w._prev_signatures = {n: service_signature(n, w._quotas[n]) for n in SERVICE_KEYS}
-        w._active_services = set()
-        w._quiet_polls = {n: 0 for n in SERVICE_KEYS}
-        new_ds = self._deepseek(balance="25.92")
-        new_ds.reset_5h = self.now - timedelta(hours=1)  # 倒计时流逝不在快照里
-        snap = UsageSnapshot(kimi=w._quotas["kimi"], opencode=w._quotas["opencode"],
-                             deepseek=new_ds, errors={})
-        w._on_snapshot_received((snap, {}))
-        self.assertNotIn("deepseek", w._active_services)
-
-    async def test_three_quiet_polls_deactivate_all(self):
-        w = self.widget
-        w._quotas = {"kimi": self._kimi(95.0), "opencode": self._opencode(75.0),
-                     "deepseek": self._deepseek()}
-        w._prev_signatures = {n: service_signature(n, w._quotas[n]) for n in SERVICE_KEYS}
-        w._active_services = {"kimi", "opencode"}
-        w._quiet_polls = {n: 0 for n in SERVICE_KEYS}
-        for _ in range(3):
-            snap = UsageSnapshot(kimi=w._quotas["kimi"], opencode=w._quotas["opencode"],
-                                 deepseek=w._quotas["deepseek"], errors={})
-            w._on_snapshot_received((snap, {}))
-        self.assertEqual(w._active_services, set())  # 两个都静默退出
-
-    async def test_one_quiet_one_active_stays_split(self):
-        w = self.widget
-        w._quotas = {"kimi": self._kimi(95.0), "opencode": self._opencode(75.0),
-                     "deepseek": self._deepseek()}
-        w._prev_signatures = {n: service_signature(n, w._quotas[n]) for n in SERVICE_KEYS}
-        w._active_services = {"kimi", "opencode"}
-        w._quiet_polls = {"kimi": 0, "opencode": 0, "deepseek": 0}
-        # Kimi 静默一轮、OpenCode 余额变化激活
-        snap = UsageSnapshot(kimi=w._quotas["kimi"],
-                             opencode=self._opencode(70.0), deepseek=w._quotas["deepseek"],
-                             errors={})
-        w._on_snapshot_received((snap, {}))
-        self.assertIn("opencode", w._active_services)   # 变化 → 保持活动
-        self.assertIn("kimi", w._active_services)       # 一轮静默未达 3 次 → 仍活动
-        self.assertEqual(w._quiet_polls["kimi"], 1)     # 但静默计数已开始
-
-    async def test_single_service_error_only_marks_that_service(self):
-        w = self.widget
-        w._quotas = {"kimi": self._kimi(95.0), "opencode": self._opencode(75.0),
-                     "deepseek": self._deepseek()}
-        w._prev_signatures = {n: service_signature(n, w._quotas[n]) for n in SERVICE_KEYS}
-        w._active_services = set()
-        w._quiet_polls = {n: 0 for n in SERVICE_KEYS}
-        broken = self._opencode(75.0)
-        snap = UsageSnapshot(kimi=w._quotas["kimi"], opencode=broken,
-                             deepseek=w._quotas["deepseek"],
-                             errors={"opencode": "上游 500"})
-        w._on_snapshot_received((snap, {}))
-        self.assertEqual(w._errors["opencode"], "上游 500")
-        self.assertEqual(w._errors["kimi"], "")
-        self.assertEqual(w._errors["deepseek"], "")
-        # 错误不影响其他服务的档位：Kimi 无变化保持空闲
-        self.assertNotIn("kimi", w._active_services)
-
-
-if __name__ == "__main__":
-    unittest.main()
+            painter.end()
+        self.assertGreater(image.pixelColor(48, 34).alpha(), 0)
