@@ -87,6 +87,7 @@ def mini_size(orientation: str):
 
 
 RING_SERVICES = ("kimi", "opencode")   # 双环只属于这两家；DeepSeek 是余额 hero
+MINI_TITLE_BAND = 19                   # 迷你卡标题带高度（标题 y=5 + 行高 14）
 
 
 def panel_ring_anchors(orientation: str):
@@ -98,10 +99,12 @@ def panel_ring_anchors(orientation: str):
 
 
 def mini_ring_anchors(orientation: str):
-    """迷你卡层双环锚点（mini 坐标系）：两个单元各自的圆心。"""
+    """迷你卡层双环锚点（mini 坐标系）：标题带以下的垂直居中点，
+    与单元内标题同轴（水平居中）。"""
     out = {}
     for name, cell in zip(RING_SERVICES, mini_cell_rects(orientation)):
-        out[name] = (cell.center().x(), cell.center().y())
+        cy = cell.y() + MINI_TITLE_BAND + (cell.height() - MINI_TITLE_BAND) / 2
+        out[name] = (cell.center().x(), cy)
     return out
 
 
@@ -133,18 +136,18 @@ class MorphState:
 def interpolate_morph(state: MorphState, fraction: float):
     """返回当前帧：(窗口矩形, 圆环锚点)。
 
-    圆环锚点为 Kimi/OpenCode 两环的 (cx, cy)——面板卡片中心 ⇄ 迷你卡单元
-    中心按 fraction 插值（端点精确，中间帧为线性过渡）。
+    圆环锚点为 Kimi/OpenCode 两环的 (cx, cy)——面板 hero 圆心 ⇄ 迷你卡
+    单元圆心按 fraction 插值，端点与静态层锚点严格一致（无端点跳环）。
     """
     rect = _lerp_rect(state.start_rect, state.end_rect, fraction)
+    p_anchors = panel_ring_anchors(state.panel_orientation)
+    c_anchors = mini_ring_anchors(state.card_orientation)
     anchors = []
     for idx in range(2):
-        p_cell = state.panel_cells[idx]
-        c_cell = state.card_cells[idx]
-        anchors.append((
-            _lerp(p_cell.center().x(), c_cell.center().x(), fraction),
-            _lerp(p_cell.center().y(), c_cell.center().y(), fraction),
-        ))
+        name = RING_SERVICES[idx]
+        px, py = p_anchors[name]
+        cx, cy = c_anchors[name]
+        anchors.append((_lerp(px, cx, fraction), _lerp(py, cy, fraction)))
     return rect, anchors
 
 

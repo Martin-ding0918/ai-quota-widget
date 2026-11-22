@@ -658,8 +658,8 @@ class QuotaWidget(QWidget):
             for name, cell in zip(("kimi", "opencode"), cells):
                 p.setPen(QPen(COLOR_SUBTLE))
                 p.setFont(cards_mod._card_font(9))
-                p.drawText(QRectF(cell.x() + 8, cell.y() + 5, cell.width() - 8, 14),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                p.drawText(QRectF(cell.x(), cell.y() + 5, cell.width(), 14),
+                           Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
                            SERVICE_TITLES[name])
             p.setOpacity(1.0)
 
