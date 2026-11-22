@@ -463,10 +463,6 @@ class QuotaWidget(QWidget):
                                else end_panel_or),
             card_orientation=(self._card_orientation if target == 0.0
                               else end_card_or),
-            panel_cells=panel_card_rects(self._panel_orientation
-                                         if target == 1.0 else end_panel_or),
-            card_cells=mini_cell_rects(self._card_orientation
-                                       if target == 0.0 else end_card_or),
         )
         self._morph_start_t = self._t
         self._morph_start_rect = QRect(self.geometry())
@@ -587,14 +583,16 @@ class QuotaWidget(QWidget):
         mini_alpha = smoothstep(0.30, 0.80, t)
         dim = 0.45 if self._last_error else 1.0
 
+        panel_or, card_or = self._effective_orientations()
+
         # 中层：静态展开内容（数据变化时 RenderCache 重建；随 detail_alpha 淡出）
         self._render_cache.ensure(
-            (self._panel_orientation, self._card_orientation),
+            (panel_or, card_or),
             self.devicePixelRatioF(),
             self._card_specs(now),
         )
         if panel_alpha > 0.004:
-            pix = self._render_cache.pixmap(self._panel_orientation)
+            pix = self._render_cache.pixmap(panel_or)
             if pix is not None:
                 p.setOpacity(panel_alpha * dim)
                 p.drawPixmap(QRect(0, 0, w, h), pix)
@@ -619,12 +617,12 @@ class QuotaWidget(QWidget):
             )
 
         # 面板层动态文字：5h/周/月 倒计时（随 detail_alpha 淡出，位置随窗口缩放）
-        if panel_alpha > 0.004 and self._panel_orientation:
-            pw, ph = panel_size(self._panel_orientation)
+        if panel_alpha > 0.004:
+            pw, ph = panel_size(panel_or)
             sx, sy = w / pw, h / ph
             p.setOpacity(panel_alpha * dim)
             p.setFont(cards_mod._card_font(9))
-            rects = panel_card_rects(self._panel_orientation)
+            rects = panel_card_rects(panel_or)
             for idx, name in enumerate(("kimi", "opencode")):
                 quota = self._quotas.get(name)
                 r = rects[idx]
@@ -654,7 +652,7 @@ class QuotaWidget(QWidget):
         # 迷你层标题（随 mini_alpha 淡入，锚点与主环一致）
         if mini_alpha > 0.004:
             p.setOpacity(mini_alpha)
-            cells = mini_cell_rects(self._card_orientation)
+            cells = mini_cell_rects(card_or)
             for name, cell in zip(("kimi", "opencode"), cells):
                 p.setPen(QPen(COLOR_SUBTLE))
                 p.setFont(cards_mod._card_font(9))
@@ -717,10 +715,11 @@ class QuotaWidget(QWidget):
             out[name] = spec
         return out
 
-    def _ring_anchors(self):
-        """当前帧 Kimi/OpenCode 圆环锚点（widget 坐标）。
+    def _effective_orientations(self):
+        """当前帧的（面板层方向，迷你卡层方向）。
 
-        形变中按 _t 在面板锚点与迷你卡锚点间插值；静态时即当前方向的锚点。
+        形变中按形变起止矩形推断（拖拽换边后属性滞后一个形变——若直接用属性，
+        换向后的首次展开会以旧方向渲染静态层，结束时弹跳）；静止时即当前属性。
         """
         panel_or = self._panel_orientation
         card_or = self._card_orientation
@@ -731,6 +730,14 @@ class QuotaWidget(QWidget):
                 panel_or, card_or = end_or, start_or
             else:                                       # 收起：面板淡出(start)、卡淡入(end)
                 panel_or, card_or = start_or, end_or
+        return panel_or, card_or
+
+    def _ring_anchors(self):
+        """当前帧 Kimi/OpenCode 圆环锚点（widget 坐标）。
+
+        形变中按 _t 在面板锚点与迷你卡锚点间插值；静态时即当前方向的锚点。
+        """
+        panel_or, card_or = self._effective_orientations()
         panel_anchors = panel_ring_anchors(panel_or)
         card_anchors = mini_ring_anchors(card_or)
         t = self._t

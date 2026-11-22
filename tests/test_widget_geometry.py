@@ -238,6 +238,59 @@ class TestForceTargets(unittest.TestCase):
         )
 
 
+class TestEffectiveOrientations(unittest.TestCase):
+    """拖拽换边（横⇄纵）后的首次形变：paint 各层方向必须取自形变起止矩形，
+    而不是滞后一个形变的属性——否则换向后的首次展开会以旧方向渲染静态层，
+    形变结束时弹跳（跳帧）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.pop("QT_QPA_PLATFORM", None)
+        cls.app = QApplication.instance() or QApplication([])
+        tmp = Path(tempfile.gettempdir()) / "kqw-orient-config.json"
+        tmp.write_text("{}", encoding="utf-8")
+        cls._old_cfg_path = config.CONFIG_PATH
+        config.CONFIG_PATH = tmp
+        cls.widget = QuotaWidget()
+
+    @classmethod
+    def tearDownClass(cls):
+        config.CONFIG_PATH = cls._old_cfg_path
+
+    def _morph(self, target_t, start_rect, end_rect, panel_or, card_or):
+        from widget_app.layout import MorphState
+        self.widget._morph_state = MorphState(
+            progress=0.0, start_t=1.0 - target_t, target_t=target_t,
+            start_rect=start_rect, end_rect=end_rect,
+            panel_orientation=panel_or, card_orientation=card_or)
+
+    def test_expand_after_rotation_uses_rect_orientations(self):
+        # 拖拽换边后遗留：_panel_orientation 仍是旧方向（horizontal），
+        # 而当前是竖迷你 → 首次展开（竖面板）帧方向必须全为 vertical
+        w = self.widget
+        w._panel_orientation = "horizontal"
+        w._card_orientation = "vertical"
+        self._morph(0.0, QRect(0, 0, 96, 192), QRect(0, 0, 176, 572),
+                    "vertical", "vertical")
+        self.assertEqual(w._effective_orientations(), ("vertical", "vertical"))
+
+    def test_collapse_after_rotation_fades_panel_in_old_orientation(self):
+        # 反向（纵→横）：收起时淡出的面板层用起点矩形方向（旧），迷你层用终点（新）
+        w = self.widget
+        w._panel_orientation = "vertical"
+        w._card_orientation = "horizontal"
+        self._morph(1.0, QRect(0, 0, 176, 572), QRect(0, 0, 192, 96),
+                    "vertical", "horizontal")
+        self.assertEqual(w._effective_orientations(), ("vertical", "horizontal"))
+
+    def test_no_morph_returns_attributes(self):
+        w = self.widget
+        w._morph_state = None
+        w._panel_orientation = "vertical"
+        w._card_orientation = "vertical"
+        self.assertEqual(w._effective_orientations(), ("vertical", "vertical"))
+
+
 class TestSnapshotReceived(unittest.IsolatedAsyncioTestCase):
     """_on_snapshot_received：按服务独立档位判定（Kimi 变化只激活 Kimi）。"""
 

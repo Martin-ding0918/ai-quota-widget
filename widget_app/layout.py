@@ -129,8 +129,6 @@ class MorphState:
     end_rect: QRect = field(default_factory=QRect)
     panel_orientation: str = "horizontal"   # 淡出层的排列方向
     card_orientation: str = "horizontal"    # 淡入层（迷你卡）的排列方向
-    panel_cells: tuple = ()           # 面板坐标系的三卡矩形
-    card_cells: tuple = ()            # 迷你卡坐标系的两单元矩形
 
 
 def interpolate_morph(state: MorphState, fraction: float):
