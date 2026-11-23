@@ -16,9 +16,7 @@ from widget_app.quota import (
     parse_kimi_quota,
     parse_opencode_quota,
     parse_reset_datetime,
-    parse_usage_snapshot,
     poll_step,
-    quota_signature,
 )
 
 NOW = datetime(2026, 11, 20, 4, 0, 0, tzinfo=timezone.utc)
@@ -306,16 +304,6 @@ class TestServiceId(unittest.TestCase):
         self.assertEqual(q.service_id, 7)
 
 
-class TestQuotaSignature(unittest.TestCase):
-    def test_tuple_of_three(self):
-        q = parse_kimi_quota([make_service(kimi_fields())], now=NOW)
-        self.assertEqual(quota_signature(q),
-                         (q.five_hour_remaining, q.month_total_remaining, q.month_code_remaining))
-
-    def test_none(self):
-        self.assertEqual(quota_signature(None), (None, None, None))
-
-
 class TestPollStep(unittest.TestCase):
     """双速轮询档位判定：变化激活 / None⇄有值 / 3 次静默回落 / 首次基线。"""
 
@@ -488,69 +476,6 @@ class TestDeepSeekQuota(unittest.TestCase):
         q = parse_deepseek_quota(self.service, now=self.now)
         self.assertIsNone(q.balance)
         self.assertEqual(q.currency, "")
-
-
-class TestUsageSnapshot(unittest.TestCase):
-    """一次响应解析三服务：按 service_type 分类，9527 等无关服务忽略。"""
-
-    def setUp(self):
-        self.now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
-        self.kimi = {
-            "id": 1, "service_type": "custom", "name": "Kimi Code",
-            "result": {"status": "ok", "data": {"fields": [
-                {"path": "usages.limit_5h.used_ratio", "label": "5 小时剩余",
-                 "type": "percentage_fraction_ring", "value": 0.05},
-            ]}},
-        }
-        self.deepseek = {
-            "id": 2, "service_type": "deepseek", "name": "DeepSeek",
-            "result": {"status": "ok", "data": {"is_available": True, "balance_infos": [
-                {"currency": "CNY", "total_balance": "25.92"}]}},
-        }
-        self.code9527 = {
-            "id": 3, "service_type": "custom", "name": "9527CODE",
-            "result": {"status": "ok", "data": {"fields": [
-                {"path": "data.quota", "label": "余额", "type": "balance", "value": 46.57}]}},
-        }
-        self.opencode = {
-            "id": 5, "service_type": "opencode", "name": "OpenCode",
-            "result": {"status": "ok", "data": {"five_hour": {"percent_used": 25.0}}},
-        }
-
-    def test_three_services_parsed(self):
-        snap = parse_usage_snapshot([self.kimi, self.deepseek, self.code9527, self.opencode], now=self.now)
-        self.assertIsNotNone(snap.kimi)
-        self.assertIsNotNone(snap.deepseek)
-        self.assertIsNotNone(snap.opencode)
-        self.assertAlmostEqual(snap.kimi.five_hour_remaining, 95.0)
-        self.assertEqual(snap.deepseek.currency, "CNY")
-        self.assertAlmostEqual(snap.opencode.five_hour_remaining, 75.0)
-        self.assertEqual((snap.kimi.service_id, snap.opencode.service_id, snap.deepseek.service_id), (1, 5, 2))
-
-    def test_9527_not_mistaken_for_kimi(self):
-        snap = parse_usage_snapshot([self.code9527, self.deepseek], now=self.now)
-        self.assertIsNone(snap.kimi)
-        self.assertIsNotNone(snap.deepseek)
-
-    def test_error_status_recorded_in_errors(self):
-        broken = {
-            "id": 5, "service_type": "opencode", "name": "OpenCode",
-            "result": {"status": "error", "error": "上游 500"},
-        }
-        snap = parse_usage_snapshot([self.kimi, broken], now=self.now)
-        self.assertEqual(snap.errors.get("opencode"), "上游 500")
-
-    def test_missing_services_are_none(self):
-        snap = parse_usage_snapshot([self.kimi], now=self.now)
-        self.assertIsNone(snap.opencode)
-        self.assertIsNone(snap.deepseek)
-        self.assertEqual(snap.errors, {})
-
-    def test_non_list_payload(self):
-        snap = parse_usage_snapshot(None, now=self.now)
-        self.assertIsNone(snap.kimi)
-        self.assertIsNone(snap.opencode)
-        self.assertIsNone(snap.deepseek)
 
 
 if __name__ == "__main__":

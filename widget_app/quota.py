@@ -83,16 +83,6 @@ class DeepSeekQuota:
     service_id: Optional[int] = None
 
 
-@dataclass
-class UsageSnapshot:
-    """一次 /api/usage 响应中三个目标服务的解析结果与逐服务错误。"""
-
-    kimi: Optional[KimiQuota]
-    opencode: Optional[OpenCodeQuota]
-    deepseek: Optional[DeepSeekQuota]
-    errors: dict
-
-
 # Kimi 的 5 小时限额窗口长度；收起态迷你卡的"满环"基准
 FIVE_H_WINDOW = timedelta(hours=5)
 
@@ -241,13 +231,6 @@ def _safe_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def quota_signature(q: Optional[KimiQuota]) -> tuple:
-    """三档剩余百分比快照 (5h, 月总, 月代码)，供额度变动判定；q 为 None 返回全 None。"""
-    if q is None:
-        return (None, None, None)
-    return (q.five_hour_remaining, q.month_total_remaining, q.month_code_remaining)
 
 
 def poll_step(prev_sig, cur_sig, active: bool, quiet_streak: int,
@@ -453,63 +436,3 @@ def parse_deepseek_quota(service: dict, now: Optional[datetime] = None) -> DeepS
         stale=bool(result.get("stale_error")) or str(result.get("status") or "").strip().lower() != "ok",
         service_id=_safe_int(service.get("id")) if isinstance(service, dict) else None,
     )
-
-
-SERVICE_KEYS = ("kimi", "opencode", "deepseek")
-
-
-def parse_usage_snapshot(payload: Any, now: Optional[datetime] = None) -> UsageSnapshot:
-    """一次 /api/usage 响应解析三个目标服务（按 service_type 准确分类）。
-
-    custom 且带 Kimi 字段标记 → Kimi；opencode → OpenCode；deepseek → DeepSeek；
-    其余（如 9527CODE）忽略。服务端返回 status=error 的服务记入 errors。
-    """
-    if now is None:
-        now = datetime.now(timezone.utc)
-    elif now.tzinfo is None:
-        now = now.astimezone()
-    kimi: Optional[KimiQuota] = None
-    opencode: Optional[OpenCodeQuota] = None
-    deepseek: Optional[DeepSeekQuota] = None
-    errors: dict = {}
-    if isinstance(payload, list):
-        for svc in payload:
-            if not isinstance(svc, dict):
-                continue
-            st = str(svc.get("service_type") or "").strip().lower()
-            result = svc.get("result")
-            if isinstance(result, dict) and result.get("status") == "error":
-                errors[st or str(_safe_int(svc.get("id")))] = str(result.get("error") or "未知错误")
-            if st == "opencode" and opencode is None:
-                opencode = parse_opencode_quota(svc, now)
-            elif st == "deepseek" and deepseek is None:
-                deepseek = parse_deepseek_quota(svc, now)
-            elif st == "custom" and kimi is None:
-                data = result.get("data") if isinstance(result, dict) else None
-                fields = data.get("fields") if isinstance(data, dict) else None
-                if isinstance(fields, list) and _has_kimi_marker(fields):
-                    kimi = _parse_kimi_from_service(svc, now)
-    return UsageSnapshot(kimi=kimi, opencode=opencode, deepseek=deepseek, errors=errors)
-
-
-def deepseek_signature(q: Optional[DeepSeekQuota]) -> tuple:
-    """DeepSeek 变化检测快照：币种、余额（两位小数字符串）、可用状态。
-    单纯倒计时流逝不会出现在快照里，不会误触活动档。"""
-    if q is None:
-        return (None, None, None)
-    balance = f"{q.balance:.2f}" if q.balance is not None else None
-    avail = None if q.is_available is None else ("1" if q.is_available else "0")
-    return (q.currency or None, balance, avail)
-
-
-def service_signature(name: str, quota) -> Optional[tuple]:
-    """按服务名取变化检测快照；未知服务返回 None。"""
-    if name == "kimi":
-        return quota_signature(quota)
-    if name == "opencode":
-        if quota is None:
-            return (None, None, None)
-        return (quota.five_hour_remaining, quota.week_remaining, quota.month_remaining)
-    if name == "deepseek":
-        return deepseek_signature(quota)
-    return None
