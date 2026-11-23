@@ -50,6 +50,32 @@ class TestServices(unittest.TestCase):
         self.assertEqual((service.name, service.kind, service.hero.remaining), ("我的账号", "kimi", 75))
         self.assertEqual(service.hero.window_seconds, 18000)
 
+    def test_gemini_labels_are_normalized_case_insensitively(self):
+        def hero_label(raw):
+            return parse_services([row(7, "gemini", "Gemini", {"limits": [
+                {"label": raw, "percent_used": 20},
+            ]})])[7].hero.label
+
+        self.assertEqual(hero_label("Session"), "会话额度")
+        self.assertEqual(hero_label("Weekly"), "每周")
+        self.assertEqual(hero_label("Session "), "会话额度")
+        self.assertEqual(hero_label("Custom"), "Custom")
+        self.assertEqual(hero_label("   "), "额度")
+
+    def test_month_and_week_detail_rows_carry_resets(self):
+        opencode = parse_services([row(5, "opencode", "OpenCode", {
+            "week": {"percent_used": 11, "resets_at": "2026-11-28T00:00:00Z"},
+            "month": {"percent_used": 5, "resets_at": "2026-12-01T00:00:00Z"},
+        })])[5]
+        self.assertEqual((opencode.details[0].reset.day, opencode.details[1].reset.day), (28, 1))
+        kimi = parse_services([row(21, "custom", "Kimi", {"fields": [
+            {"type": "percentage_fraction", "path": "usages.limit_month_total.used_ratio", "label": "月总", "value": 0.5},
+            {"type": "percentage_fraction", "path": "usages.limit_month_code.used_ratio", "label": "月代码", "value": 0.3},
+            {"type": "reset_date", "path": "usages.limit_month.reset_time", "label": "月重置",
+             "value": "2026-12-01T00:00:00Z"},
+        ]})])[21]
+        self.assertEqual((kimi.details[0].reset.day, kimi.details[1].reset.day), (1, 1))
+
     def test_defaults_selection_rename_and_temporary_absence(self):
         services = parse_services(self.rows)
         self.assertEqual(default_ids(services, legacy=True), [12, 26, 31])

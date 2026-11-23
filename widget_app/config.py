@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import sys
@@ -41,6 +42,7 @@ DEFAULTS = {
     "window_y": None,
     "snap_edge": "",        # 贴边收起："" | top | bottom | left | right
     "blink_enabled": True,  # 低额度（5h 剩余 <10%）时收起卡闪烁提醒
+    "allow_insecure_http": False,  # 非回环 HTTP 需用户显式允许（明文传输）
     "service_preferences": {},
     "legacy_service_scope": "",
 }
@@ -78,6 +80,41 @@ def normalize_origin(server_url: str) -> str:
     return f"{scheme}://{host}"
 
 
+def http_security(server_url: str) -> str:
+    """Classify a server URL for transport safety.
+
+    Returns "secure" for HTTPS, "loopback" for HTTP on localhost/127.0.0.0/8/::1,
+    "insecure" for other HTTP, and "invalid" for malformed URLs, userinfo in the
+    URL, or an invalid port.
+    """
+    text = (server_url or "").strip()
+    if not text:
+        return "invalid"
+    if "://" not in text:
+        text = "http://" + text
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        return "invalid"
+    scheme = (parts.scheme or "http").lower()
+    host = (parts.hostname or "").strip().lower().rstrip(".")
+    if not host or scheme not in ("http", "https") or parts.username is not None:
+        return "invalid"
+    if port is not None and not 0 < port < 65536:
+        return "invalid"
+    if scheme == "https":
+        return "secure"
+    if host == "localhost" or host.endswith(".localhost"):
+        return "loopback"
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return "loopback"
+    except ValueError:
+        pass
+    return "insecure"
+
+
 def credential_scope(server_url: str, username: str) -> str:
     """凭据作用域键：「规范化源地址|用户名」。密码与 token 都绑定到它。"""
     username = (username or "").strip().lower()
@@ -100,6 +137,8 @@ def load_config() -> dict:
     for key in ("server_url", "username", "legacy_service_scope"):
         if not isinstance(cfg[key], str):
             cfg[key] = DEFAULTS[key]
+    if not isinstance(cfg.get("allow_insecure_http"), bool):
+        cfg["allow_insecure_http"] = False
     if "service_preferences" not in raw and isinstance(raw.get("username"), str) and raw["username"]:
         cfg["legacy_service_scope"] = credential_scope(cfg["server_url"], raw["username"])
     cfg["service_preferences"] = _clean_preferences(cfg["service_preferences"])
@@ -190,7 +229,7 @@ def save_config(cfg: dict) -> None:
 
 def get_stored_token(cfg: dict, server_url: str, username: str) -> str:
     """读取当前作用域的会话 token（凭据管理器优先，旧 config.json 字段回退）；
-    无会话返回 ""。"""
+    无会话返回 ""。旧字段按完整作用域精确匹配，不按用户名或部分地址放行。"""
     scope = credential_scope(server_url, username)
     if keyring is not None:
         try:
@@ -199,24 +238,31 @@ def get_stored_token(cfg: dict, server_url: str, username: str) -> str:
                 return token
         except Exception:
             pass
-    # 旧字段回退仅当其作用域与查询一致（同一 config 内的 server/username）
+    # 旧单字段回退仅当其作用域与查询一致（同一 config 内的 server/username）
     same_scope = credential_scope(cfg.get("server_url") or "", cfg.get("username") or "") == scope
-    if same_scope:
-        return cfg.get("token") or ""
-    return ""
+    token = cfg.get("token") if same_scope else ""
+    if isinstance(token, str) and token:
+        return token
+    # v1.0.2 分桶 token 按完整 scope 精确查询
+    legacy = cfg.get("legacy_tokens")
+    token = legacy.get(scope) if isinstance(legacy, dict) and scope else ""
+    return token if isinstance(token, str) else ""
 
 
 def set_stored_token(cfg: dict, server_url: str, username: str, token: str) -> None:
     if keyring is None:
         raise ConfigError("keyring 不可用，无法保存会话 token")
     scope = credential_scope(server_url, username)
-    if token:
-        keyring.set_password(KEYRING_TOKEN_SERVICE, scope, token)
-    else:
-        try:
-            keyring.delete_password(KEYRING_TOKEN_SERVICE, scope)
-        except Exception:
-            pass
+    try:
+        if token:
+            keyring.set_password(KEYRING_TOKEN_SERVICE, scope, token)
+        else:
+            try:
+                keyring.delete_password(KEYRING_TOKEN_SERVICE, scope)
+            except Exception:
+                pass
+    except Exception as exc:
+        raise ConfigError(f"写入凭据管理器失败：{exc}") from exc
     if cfg.get("token"):
         cfg["token"] = ""  # 旧字段不再维护
 

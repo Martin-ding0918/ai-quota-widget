@@ -6,7 +6,8 @@ CARD_W, CARD_H = 160, 176
 CARD_CELL_SIZE = 96
 GAP, MARGIN = 8, 8
 TITLE_Y, HERO_CY, HERO_LABEL_Y, STATUS_Y = 7, 51, 76, 90
-DETAIL_ROWS = (106, 138)
+RING_STATUS_Y = 75
+DETAIL_ROWS = (100, 135)
 VERTICAL_EDGES = ("left", "right")
 EDGES = ("top", "bottom", *VERTICAL_EDGES)
 
@@ -70,3 +71,13 @@ def window_rect(grid, screen, x, y, edge=""):
     elif edge == "right":
         x = screen.x + screen.width - grid.width
     return Rect(x, y, grid.width, grid.height)
+
+
+def nearest_edge(rect, screen, threshold=None):
+    # Negative gaps mean the window has already crossed that edge.
+    gaps = {"left": rect.x - screen.x,
+            "right": screen.x + screen.width - rect.x - rect.width,
+            "top": rect.y - screen.y,
+            "bottom": screen.y + screen.height - rect.y - rect.height}
+    edge = min(gaps, key=gaps.get)
+    return edge if threshold is None or gaps[edge] <= threshold else ""

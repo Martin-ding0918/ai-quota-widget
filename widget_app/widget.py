@@ -6,13 +6,13 @@ import threading
 import time
 import webbrowser
 from datetime import datetime, timezone
-from PySide6.QtCore import QEasingCurve, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QWidget
 
 from . import cards, config
 from .api_client import OpenUsageClient, OpenUsageError
-from .layout import EDGES, VERTICAL_EDGES, Rect, mini_layout, panel_layout, window_rect
+from .layout import EDGES, VERTICAL_EDGES, Rect, mini_layout, nearest_edge, panel_layout, window_rect
 from .quota import poll_step
 from .services import default_ids, fetch_services, merge_services, selected_ids
 from .settings import SettingsDialog
@@ -51,11 +51,13 @@ class QuotaWidget(QWidget):
         self._quiet = {}
         self._active = set()
         self._last_error = ""
+        self._credential_warning = ""
         self._fetch_inflight = False
         self._manual_pending = False
         self._snapshot_loaded = False
         self._blink_enabled = bool(self._cfg.get("blink_enabled", True))
         self._settings_dialog = None
+        self._error_dialog = None
         self._menu = None
         saved_edge = self._cfg.get("snap_edge")
         self._snap_edge = saved_edge if saved_edge in EDGES else ""
@@ -77,7 +79,7 @@ class QuotaWidget(QWidget):
         self._poll_timer.timeout.connect(self.refresh)
         self._poll_timer.start()
         self._tick_timer = QTimer(self, interval=1000)
-        self._tick_timer.timeout.connect(self.update)
+        self._tick_timer.timeout.connect(self._tick)
         self._tick_timer.start()
         self._collapse_timer = QTimer(self, interval=COLLAPSE_MS, singleShot=True)
         self._collapse_timer.timeout.connect(self._auto_collapse)
@@ -185,29 +187,21 @@ class QuotaWidget(QWidget):
             self._finish_poll(client)
 
     def _finish_poll(self, client):
-        self._fetch_inflight = False
-        token = client.token
-        if token and token != config.get_stored_token(self._cfg, client.base_url, client.username):
-            try:
-                config.set_stored_token(self._cfg, client.base_url, client.username, token)
-            except config.ConfigError:
-                pass
-        self._update_tooltip()
-        self.update()
-        if self._manual_pending:
-            self._manual_pending = False
-            self.refresh(manual=True)
-
-    def _update_tooltip(self):
-        ids, _ = self._selection()
-        now = datetime.now(timezone.utc).astimezone()
-        lines = [self._last_error] if self._last_error else []
-        for service_id in ids:
-            service = self._services[service_id]
-            detail = cards.metric_text(service.hero, now) if service.hero else "—"
-            status = cards.service_status(service)
-            lines.append(f"{service.name}：{detail}" + (f" · {status}" if status else ""))
-        self.setToolTip("\n".join(lines) or self._empty_text())
+        try:
+            token = client.token
+            if token and token != config.get_stored_token(self._cfg, client.base_url, client.username):
+                try:
+                    config.set_stored_token(self._cfg, client.base_url, client.username, token)
+                except config.ConfigError:
+                    self._credential_warning = "新 token 未能保存，重启后可能需要重新登录"
+                else:
+                    self._credential_warning = ""
+        finally:
+            self._fetch_inflight = False
+            self.update()
+            if self._manual_pending:
+                self._manual_pending = False
+                self.refresh(manual=True)
 
     def _geo(self):
         screen = QApplication.screenAt(QCursor.pos()) if self._dragging else None
@@ -221,12 +215,14 @@ class QuotaWidget(QWidget):
         return panel_layout(len(panel), self._panel_vertical, geo.width, geo.height)
 
     def _reflow(self, x=None, y=None):
+        if self._dragging:
+            return
         mini = (self._animation_target if self._animation_target is not None else self._t) >= 0.5
         self._animate(mini, x=x, y=y)
 
-    def _animate(self, mini, x=None, y=None):
+    def _animate(self, mini, x=None, y=None, geo=None):
         self._stop_animation()
-        geo = self._geo()
+        geo = geo or self._geo()
         grid = self._grid(mini, geo)
         origin = self.geometry()
         goal = _qt(window_rect(grid, geo, origin.x() if x is None else x,
@@ -263,41 +259,36 @@ class QuotaWidget(QWidget):
             self._animation.deleteLater()
             self._animation = self._animation_target = None
 
-    def _nearest_edge(self, force=False):
-        geo, frame = self._geo(), self.frameGeometry()
-        distances = {"left": abs(frame.left() - geo.x),
-                     "right": abs(frame.right() + 1 - geo.x - geo.width),
-                     "top": abs(frame.top() - geo.y),
-                     "bottom": abs(frame.bottom() + 1 - geo.y - geo.height)}
-        edge = min(distances, key=distances.get)
-        return edge if force or distances[edge] <= SNAP_THRESHOLD else ""
+    def _nearest_edge(self, geo, release):
+        pointer = Rect(release.x(), release.y(), 1, 1)
+        return (nearest_edge(pointer, geo, SNAP_THRESHOLD)
+                or nearest_edge(_rect(self.frameGeometry()), geo, SNAP_THRESHOLD))
 
-    def _snap(self, edge):
+    def _snap(self, edge, geo):
         self._snap_edge = edge
         self._collapse_timer.stop()
         self._mini_vertical = self._panel_vertical = edge in VERTICAL_EDGES
-        self._save_position()
-        self._animate(True)
-
-    def _unsnap(self, grab=None):
-        self._snap_edge = ""
-        self._panel_vertical = False
-        self._collapse_timer.stop()
-        grid = self._grid(False, self._geo())
-        x, y = self.x(), self.y()
-        if grab is not None:
-            cursor = QCursor.pos()
-            x = round(cursor.x() - grab[0] * grid.width)
-            y = round(cursor.y() - grab[1] * grid.height)
-        target = window_rect(grid, self._geo(), x, y)
+        target = window_rect(self._grid(True, geo), geo, self.x(), self.y(), edge)
         self._save_position(target.x, target.y)
-        self._animate(False, target.x, target.y)
+        self._animate(True, geo=geo)
+
+    def _settle_floating(self, geo):
+        target = window_rect(self._grid(False, geo), geo, self.x(), self.y())
+        self._save_position(target.x, target.y)
+        self._animate(False, target.x, target.y, geo=geo)
 
     def _auto_collapse(self):
         if self._menu is not None or self._dragging:
             self._collapse_timer.start()
-        elif self._snap_edge and not self.underMouse():
+        elif self._snap_edge and not self.frameGeometry().contains(QCursor.pos()):
             self._animate(True)
+
+    def _tick(self):
+        if (self._snap_edge and self._t < 0.999 and self._animation_target != 1
+                and self._menu is None and not self._dragging and not self._collapse_timer.isActive()
+                and not self.frameGeometry().contains(QCursor.pos())):
+            self._collapse_timer.start()
+        self.update()
 
     def enterEvent(self, event):
         self._collapse_timer.stop()
@@ -381,8 +372,6 @@ class QuotaWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._pressed_at = event.globalPosition()
             self._drag_offset = event.position().toPoint()
-            self._grab = (event.position().x() / max(1, self.width()),
-                          event.position().y() / max(1, self.height()))
 
     def mouseMoveEvent(self, event):
         if self._pressed_at is None or not event.buttons() & Qt.MouseButton.LeftButton:
@@ -402,19 +391,32 @@ class QuotaWidget(QWidget):
         self._pressed_at = None
         dragged, self._dragging = self._dragging, False
         if dragged:
-            edge = self._nearest_edge()
+            release = event.globalPosition().toPoint()
+            self.move(release - self._drag_offset)
+            screen = QApplication.screenAt(release)
+            geo = _rect(screen.availableGeometry()) if screen else self._geo()
+            edge = self._nearest_edge(geo, release) or self._snap_edge
             if edge:
-                self._snap(edge)
+                self._snap(edge, geo)
             else:
-                self._unsnap(self._grab)
+                self._settle_floating(geo)
         elif not self._selection()[1 if self._t >= 0.5 else 0]:
             self.show_settings()
+
+    def eventFilter(self, watched, event):
+        if (watched is self._menu
+                and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                                     QEvent.Type.MouseButtonDblClick)
+                and event.button() == Qt.MouseButton.RightButton):
+            return True
+        return super().eventFilter(watched, event)
 
     def contextMenuEvent(self, event):
         if self._menu is not None:
             self._menu.close()
         menu = QMenu(self)
         self._menu = menu
+        menu.installEventFilter(self)
         menu.addAction("立即刷新", lambda: self.refresh(manual=True))
         menu.addAction("取消贴边" if self._snap_edge else "贴边收起", self._toggle_snap)
         for label, checked, handler in (
@@ -426,6 +428,8 @@ class QuotaWidget(QWidget):
             action.setChecked(checked)
             action.triggered.connect(handler)
         menu.addAction("设置…", lambda: QTimer.singleShot(0, self.show_settings))
+        if self._error_details():
+            menu.addAction("错误详情…", lambda: QTimer.singleShot(0, self.show_errors))
         menu.addAction("打开 OpenUsage 面板", lambda: webbrowser.open(self._cfg["server_url"]))
         menu.addSeparator()
         menu.addAction("退出", QApplication.quit)
@@ -440,11 +444,53 @@ class QuotaWidget(QWidget):
         menu.aboutToHide.connect(hide)
         menu.popup(event.globalPos())
 
+    def _error_details(self):
+        details = [f"连接 OpenUsage：{self._last_error}"] if self._last_error else []
+        if self._credential_warning:
+            details.append(self._credential_warning)
+        for service_id in self._selection()[0]:
+            service = self._services[service_id]
+            status = service.error
+            if not status and (service.stale or service.unavailable):
+                status = cards.service_status(service)
+            if status:
+                details.append(f"{service.name}（#{service_id}）：{status}")
+        return "\n".join(details)
+
+    def show_errors(self):
+        if self._error_dialog is None:
+            dialog = QMessageBox(QMessageBox.Icon.Information, "AI 用量悬浮窗 — 错误详情", "",
+                                 QMessageBox.StandardButton.Close)
+            dialog.button(QMessageBox.StandardButton.Close).setText("关闭")
+            dialog.setTextFormat(Qt.TextFormat.PlainText)
+            dialog.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+            dialog.setModal(False)
+            dialog.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+            self._error_dialog = dialog
+
+            def close(_result):
+                self._error_dialog = None
+                dialog.deleteLater()
+
+            dialog.finished.connect(close)
+        dialog = self._error_dialog
+        dialog.setText(self._error_details() or "暂无错误详情。")
+        dialog.adjustSize()
+        dialog.move(self.screen().availableGeometry().center() - dialog.rect().center())
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _toggle_snap(self):
+        geo = self._geo()
         if self._snap_edge:
-            self._unsnap()
+            self._snap_edge = ""
+            self._panel_vertical = False
+            self._collapse_timer.stop()
+            self._settle_floating(geo)
         else:
-            self._snap(self._nearest_edge(force=True))
+            self._snap(nearest_edge(_rect(self.frameGeometry()), geo), geo)
 
     def _toggle_blink(self, checked):
         self._blink_enabled = checked
@@ -484,15 +530,22 @@ class QuotaWidget(QWidget):
         if server and "://" not in server:
             server = "http://" + server
         origin = config.normalize_origin(server)
-        if not username or not origin:
+        security = config.http_security(server)
+        if not username or not origin or security == "invalid":
             QMessageBox.warning(dialog, "检查连接", "请输入 HTTP 或 HTTPS 服务器地址及用户名。")
+            return
+        if security == "insecure" and not dialog.allow_insecure_http():
+            QMessageBox.warning(
+                dialog, "不安全的 HTTP",
+                "此地址使用 HTTP，密码和 token 将明文传输。请勾选“允许不安全的 HTTP”后再保存。")
             return
         scope = config.credential_scope(server, username)
         changed = scope != self._scope() or server != self._cfg["server_url"]
         if scope != self._scope() and not password and config.get_password(server, username) is None:
             QMessageBox.warning(dialog, "需要密码", "请输入新帐户的密码。")
             return
-        cfg = {**self._cfg, "server_url": server, "username": username}
+        cfg = {**self._cfg, "server_url": server, "username": username,
+               "allow_insecure_http": security == "insecure" and dialog.allow_insecure_http()}
         if dialog.selection_changed and scope == dialog.scope:
             previous = cfg["service_preferences"].get(scope, {})
             selected = dialog.preferences()
@@ -510,10 +563,13 @@ class QuotaWidget(QWidget):
         if changed or password:
             self._client = self._make_client()
             self._fetch_inflight = self._manual_pending = False
+            self._credential_warning = ""
             self._signatures.clear()
             self._quiet.clear()
             self._active.clear()
             if changed:
+                if self._error_dialog is not None:
+                    self._error_dialog.close()
                 self._services = {}
                 self._snapshot_loaded = False
                 self._last_error = ""
@@ -523,7 +579,6 @@ class QuotaWidget(QWidget):
             self._update_polling(panel)
         self._scroll = 0
         self._reflow()
-        self._update_tooltip()
         dialog.accept()
 
     def _save_position(self, x=None, y=None):

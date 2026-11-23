@@ -5,7 +5,6 @@
 """
 
 import json
-import os
 import sys
 import tempfile
 import unittest
@@ -70,6 +69,38 @@ class TestNormalizeOrigin(unittest.TestCase):
             config.normalize_origin("http://10.0.0.100:4188"),
             config.normalize_origin("https://openusage.example.com"),
         )
+
+
+class TestHttpSecurity(unittest.TestCase):
+    def test_loopback_http_forms(self):
+        for url in (
+            "http://localhost:4188",
+            "http://LOCALHOST",
+            "http://localhost.",
+            "http://127.0.0.1:4188",
+            "http://127.1.2.3",
+            "http://[::1]:4188",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(config.http_security(url), "loopback")
+
+    def test_https_is_secure(self):
+        for url in ("https://example.com", "https://localhost", "https://[::1]:4188"):
+            with self.subTest(url=url):
+                self.assertEqual(config.http_security(url), "secure")
+
+    def test_lan_http_is_insecure(self):
+        for url in ("http://10.0.0.100:4188", "http://example.com", "10.0.0.100:4188"):
+            with self.subTest(url=url):
+                self.assertEqual(config.http_security(url), "insecure")
+
+    def test_invalid_or_userinfo_urls(self):
+        for url in (
+            "", "   ", "ftp://example.com", "http://user:pass@example.com",
+            "http://example.com:99999", "http://example.com:0", "http://",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(config.http_security(url), "invalid")
 
 
 class TestCredentialScope(unittest.TestCase):
@@ -184,6 +215,37 @@ class TestTokenKeyringMigration(unittest.TestCase):
         cfg = config.load_config()
         self.assertEqual(config.get_stored_token(cfg, "http://10.0.0.100:4188", "admin"), "tok-legacy")
         self.assertEqual(config.get_stored_token(cfg, "http://other:4188", "admin"), "")
+
+    def test_v102_bucket_fallback_is_scope_exact(self):
+        cfg = {"server_url": "http://a", "username": "u", "token": "",
+               "legacy_tokens": {"http://a|u": "tok-a", "http://b|u": "tok-b"}}
+        self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "tok-a")
+        self.assertEqual(config.get_stored_token(cfg, "http://b", "u"), "tok-b")
+        self.assertEqual(config.get_stored_token(cfg, "http://a", "other"), "")
+        self.assertEqual(config.get_stored_token(cfg, "http://a:4188", "u"), "")
+
+    def test_v102_bucket_works_when_keyring_unavailable(self):
+        cfg = {"server_url": "http://a", "username": "u", "token": "",
+               "legacy_tokens": {"http://a|u": "tok-a"}}
+        with patch.object(config, "keyring", None):
+            self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "tok-a")
+
+    def test_keyring_and_single_token_precede_bucket(self):
+        cfg = {"server_url": "http://a", "username": "u", "token": "tok-single",
+               "legacy_tokens": {"http://a|u": "tok-bucket"}}
+        self.fake.store["http://a|u"] = "tok-keyring"
+        self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "tok-keyring")
+        self.fake.store.pop("http://a|u")
+        self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "tok-single")
+        cfg["token"] = ""
+        self.assertEqual(config.get_stored_token(cfg, "http://a", "u"), "tok-bucket")
+
+    def test_set_token_backend_failure_becomes_config_error(self):
+        cfg = {"token": "tok-old"}
+        with patch.object(self.fake, "set_password", side_effect=RuntimeError("backend down")):
+            with self.assertRaises(config.ConfigError):
+                config.set_stored_token(cfg, "http://a", "u", "tok-new")
+        self.assertEqual(cfg["token"], "tok-old")
 
 
 class TestPasswordScoping(unittest.TestCase):

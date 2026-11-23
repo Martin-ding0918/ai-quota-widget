@@ -96,6 +96,11 @@ def _custom_metrics(data):
             yield Metric(label, reset=at)
 
 
+def _gemini_label(row):
+    raw = str(row.get("label") or "").strip()
+    return {"session": "会话额度", "weekly": "每周"}.get(raw.lower(), raw or "额度")
+
+
 def _provider_metrics(kind, data):
     if kind == "custom":
         return list(_custom_metrics(data))
@@ -107,8 +112,8 @@ def _provider_metrics(kind, data):
     if kind == "gemini":
         return [m for raw in _array(data.get("limits"))
                 if (row := _object(raw))
-                and (m := _meter({"session": "会话额度", "weekly": "每周"}.get(row.get("label"), str(row.get("label") or "额度")),
-                                row.get("percent_used"), row.get("resets_at")))]
+                and (m := _meter(_gemini_label(row),
+                                 row.get("percent_used"), row.get("resets_at")))]
     if kind == "copilot":
         metrics = []
         for key, label in (("premium_requests", "高级请求"), ("chat", "聊天"), ("completions", "补全")):
@@ -158,12 +163,12 @@ def parse_services(payload, now=None):
             if kind == "kimi":
                 q = _parse_kimi_from_service(row, now)
                 hero = Metric("5 小时", remaining=q.five_hour_remaining, reset=q.reset_5h, window_seconds=18000)
-                details = (Metric("月总额", remaining=q.month_total_remaining),
+                details = (Metric("月总额", remaining=q.month_total_remaining, reset=q.reset_month),
                            Metric("月代码", remaining=q.month_code_remaining, reset=q.reset_month))
             elif kind == "opencode":
                 q = parse_opencode_quota(row, now)
                 hero = Metric("5 小时", remaining=q.five_hour_remaining, reset=q.reset_5h, window_seconds=18000)
-                details = (Metric("每周", remaining=q.week_remaining),
+                details = (Metric("每周", remaining=q.week_remaining, reset=q.reset_week),
                            Metric("每月", remaining=q.month_remaining, reset=q.reset_month))
                 if q.five_hour_remaining is None and q.week_remaining is None and q.month_remaining is None:
                     hero = Metric("Zen 余额", value=_amount(data.get("balance"), "$"))

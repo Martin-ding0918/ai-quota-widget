@@ -2,11 +2,11 @@
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from .config import credential_scope
+from .config import credential_scope, http_security
 
 SETTINGS_STYLE = """
 QDialog { background: #14171c; color: #e8ebef; }
@@ -19,6 +19,7 @@ QLineEdit, QComboBox, QListWidget {
 }
 QLineEdit, QComboBox { padding: 5px 8px; }
 QLineEdit:focus, QComboBox:focus, QListWidget:focus { border-color: #7ac7a0; }
+QCheckBox { color: #bec5cf; }
 QListWidget { alternate-background-color: #1c2229; outline: none; padding: 3px; }
 QListWidget::item { padding: 6px 5px; }
 QListWidget::item:selected, QComboBox QAbstractItemView::item:selected {
@@ -43,7 +44,7 @@ class SettingsDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setWindowTitle("AI 用量悬浮窗 — 设置")
         self.setStyleSheet(SETTINGS_STYLE)
-        self.resize(485, 445)
+        self.resize(485, 500)
         self.scope = credential_scope(cfg["server_url"], cfg["username"])
         self.selection_changed = False
         self.services = services
@@ -65,6 +66,13 @@ class SettingsDialog(QDialog):
         form.addRow("服务器地址", self.server)
         form.addRow("用户名", self.user)
         form.addRow("密码", self.password)
+        self.allow_insecure = QCheckBox("允许不安全的 HTTP（密码和 token 将明文传输）")
+        self.allow_insecure.setChecked(bool(cfg.get("allow_insecure_http", False)))
+        self.insecure_warning = QLabel("")
+        self.insecure_warning.setWordWrap(True)
+        self.insecure_warning.setStyleSheet("color: #e0a860;")
+        form.addRow(self.allow_insecure)
+        form.addRow(self.insecure_warning)
         tabs.addTab(account, "连接")
 
         display = QWidget()
@@ -96,6 +104,7 @@ class SettingsDialog(QDialog):
         self.mini_b.currentIndexChanged.connect(self._mini_edit)
         self.server.textChanged.connect(self._check_scope)
         self.user.textChanged.connect(self._check_scope)
+        self.allow_insecure.toggled.connect(self._check_scope)
         self.populate(services, panel_ids, mini_ids)
         if services:
             tabs.setCurrentWidget(display)
@@ -110,6 +119,9 @@ class SettingsDialog(QDialog):
 
     def credentials(self):
         return self.server.text().strip(), self.user.text().strip(), self.password.text()
+
+    def allow_insecure_http(self):
+        return self.allow_insecure.isChecked()
 
     def populate(self, services, panel_ids, mini_ids):
         if self.selection_changed:
@@ -129,6 +141,17 @@ class SettingsDialog(QDialog):
 
     def _check_scope(self):
         server, user, _ = self.credentials()
+        insecure = http_security(server) == "insecure"
+        self.allow_insecure.setVisible(insecure)
+        self.allow_insecure.setEnabled(insecure)
+        self.insecure_warning.setVisible(insecure)
+        if insecure:
+            if self.allow_insecure.isChecked():
+                self.insecure_warning.setText(
+                    "已允许不安全的 HTTP：密码和 token 将明文传输。建议通过反向代理改用 HTTPS。")
+            else:
+                self.insecure_warning.setText(
+                    "此地址使用 HTTP，密码和 token 将明文传输；保存前请勾选上面的选项。")
         current = credential_scope(server, user) == self.scope
         self.items.setEnabled(current and bool(self.services))
         self.mini_a.setEnabled(current and bool(self._panel_ids()))

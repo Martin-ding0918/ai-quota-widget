@@ -1,9 +1,12 @@
 """Paint service cards from a common title, hero, status and detail grid."""
 
+from functools import lru_cache
+import re
+
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen
 
-from .layout import DETAIL_ROWS, HERO_CY, HERO_LABEL_Y, STATUS_Y, TITLE_Y
+from .layout import DETAIL_ROWS, HERO_CY, HERO_LABEL_Y, RING_STATUS_Y, TITLE_Y
 from .quota import format_countdown_dh, format_countdown_hm
 
 COLOR_BG = QColor(20, 22, 27, 215)
@@ -63,6 +66,15 @@ def center_font(text, hole, base_pt=10.0):
         fm = QFontMetricsF(font)
     CENTER_FONT_CACHE[key] = font
     return font
+
+
+@lru_cache(maxsize=256)
+def hero_font_size(value, available, base_pt):
+    """缓存最近的文本主指标字号，按 0.5pt 缩小到 10pt 下限。"""
+    size = base_pt
+    while size > 10 and QFontMetricsF(_card_font(size, True)).horizontalAdvance(value) > available:
+        size -= 0.5
+    return size
 
 
 def draw_double_ring(p, cx, cy, r_inner, r_outer, w_inner, remaining,
@@ -152,10 +164,8 @@ def _hero(p, rect, metric, center_y, now, ring_color, mini=False):
                          ratio, ring_color, 1.0 if mini and ratio is not None else 0.0)
     else:
         value = metric_text(metric, now) if metric else "—"
-        size = 15.0 if mini else 18.0
         available = rect.width() - 16
-        while size > 10 and QFontMetricsF(_card_font(size, True)).horizontalAdvance(value) > available:
-            size -= 0.5
+        size = hero_font_size(value, available, 15.0 if mini else 18.0)
         _text(p, QRectF(rect.x() + 8, rect.y() + center_y - 18, available, 36),
               value, size=size, bold=True, color=COLOR_TEXT)
 
@@ -170,7 +180,7 @@ def _detail(p, rect, y, metric, now):
     _text(p, QRectF(x + width - value_width, rect.y() + y, value_width, 13), value,
           alignment=Qt.AlignmentFlag.AlignRight, color=COLOR_TEXT)
     if metric.remaining is not None:
-        track = QRectF(x, rect.y() + y + 15, width, 4)
+        track = QRectF(x, rect.y() + y + 14, width, 4)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(COLOR_TRACK)
         p.drawRoundedRect(track, 2, 2)
@@ -180,25 +190,50 @@ def _detail(p, rect, y, metric, now):
             fill.setWidth(track.width() * metric.remaining / 100)
             p.drawRoundedRect(fill, 2, 2)
         if metric.reset is not None:
-            _line(p, rect, y + 19, format_countdown_dh(metric.reset, now), size=7.5)
+            _text(p, QRectF(x, rect.y() + y + 20, width, 13),
+                  format_countdown_dh(metric.reset, now), size=7.5)
+
+
+def mini_caption(hero, status, label):
+    """迷你卡底部一行：环卡放到外环下方（外环底边≈82），文本主指标留在文字下。"""
+    return (status or label), (82 if hero and hero.remaining is not None else 77)
 
 
 def draw_service(p, rect, service, now, ring_color, mini=False, offline=False):
     _chrome(p, rect.adjusted(3, 3, -3, -3) if mini else rect)
-    _line(p, rect, TITLE_Y, service.name, size=9, bold=True, color=COLOR_TEXT)
+    # 迷你卡上服务名只是定位提示，用次级色弱化；展开面板仍是主色。
+    _line(p, rect, TITLE_Y, service.name, size=9, bold=True,
+          color=COLOR_SUBTLE if mini else COLOR_TEXT)
     status = "数据陈旧" if offline else service_status(service)
+    hero = service.hero
+    five_hour_ring = bool(hero and hero.remaining is not None and (
+        hero.window_seconds == 18000 or re.match(r"^\s*5\s*(?:小时|h(?:ours?|rs?)?(?![a-z]))", hero.label, re.I)
+    ))
+    label = hero.label if hero and not five_hour_ring else ""
     if mini:
-        _hero(p, rect, service.hero, 57, now, ring_color, mini=True)
-        if status or (service.hero and service.hero.remaining is None):
-            _line(p, rect, 74, status or service.hero.label, size=7)
+        _hero(p, rect, hero, 57, now, ring_color, mini=True)
+        caption, caption_y = mini_caption(hero, status, label)
+        if caption:
+            _text(p, QRectF(rect.x() + 10, rect.y() + caption_y, rect.width() - 20, 11),
+                  caption, size=7)
         return
-    _hero(p, rect, service.hero, HERO_CY, now, ring_color)
-    if service.hero:
-        _line(p, rect, HERO_LABEL_Y, service.hero.label)
-        if not status and service.hero.reset is not None and service.hero.remaining is not None:
-            formatter = format_countdown_hm if service.hero.window_seconds == 18000 else format_countdown_dh
-            status = formatter(service.hero.reset, now)
-    _line(p, rect, STATUS_Y, status)
+    _hero(p, rect, hero, HERO_CY, now, ring_color)
+    if hero and hero.remaining is not None and hero.reset is not None and not status:
+        formatter = format_countdown_hm if five_hour_ring else format_countdown_dh
+        status = formatter(hero.reset, now)
+    if label:
+        if status:
+            inner = QRectF(rect.x() + 10, rect.y() + HERO_LABEL_Y, rect.width() - 20, 15)
+            half = inner.width() / 2
+            _text(p, QRectF(inner.x(), inner.y(), half, inner.height()), label,
+                  alignment=Qt.AlignmentFlag.AlignLeft)
+            _text(p, QRectF(inner.x() + half, inner.y(), half, inner.height()), status,
+                  size=7.5, alignment=Qt.AlignmentFlag.AlignRight)
+            status = ""
+        else:
+            _line(p, rect, HERO_LABEL_Y, label)
+    if status:
+        _line(p, rect, RING_STATUS_Y, status)
     for y, metric in zip(DETAIL_ROWS, service.details):
         _detail(p, rect, y, metric, now)
 

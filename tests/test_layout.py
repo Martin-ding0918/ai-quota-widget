@@ -1,9 +1,23 @@
 import unittest
 
-from widget_app.layout import CARD_CELL_SIZE, CARD_H, CARD_W, MARGIN, Rect, mini_layout, panel_layout, window_rect
+from widget_app.layout import (
+    CARD_CELL_SIZE, CARD_H, CARD_W, MARGIN, Rect, mini_layout, nearest_edge, panel_layout, window_rect,
+)
 
 
 class TestLayout(unittest.TestCase):
+    def test_crossing_a_work_area_edge_still_selects_it(self):
+        screen = Rect(-800, 20, 800, 720)
+        for expected, rect in (
+            ("left", Rect(-900, 200, 176, 190)),
+            ("right", Rect(-50, 200, 176, 190)),
+            ("top", Rect(-450, -60, 176, 190)),
+            ("bottom", Rect(-450, 660, 176, 190)),
+            ("", Rect(-450, 220, 176, 190)),
+        ):
+            with self.subTest(expected=expected):
+                self.assertEqual(nearest_edge(rect, screen, threshold=10), expected)
+
     def test_empty_and_single_have_one_centered_cell(self):
         for count in (0, 1):
             grid = panel_layout(count, False, 1200, 900)
