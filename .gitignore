@@ -7,10 +7,9 @@ __pycache__/
 .venv/
 venv/
 
-# 构建与打包产物
+# 构建与打包产物（spec 纳入版本控制）
 build/
 dist/
-*.spec
 *.exe
 
 # 工具临时文件
