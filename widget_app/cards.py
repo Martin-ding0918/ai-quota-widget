@@ -6,7 +6,7 @@ import re
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPen
 
-from .layout import DETAIL_ROWS, HERO_CY, HERO_LABEL_Y, RING_STATUS_Y, TITLE_Y
+from .layout import DETAIL_START_Y, DETAIL_STEP_BAR, DETAIL_STEP_TEXT, HERO_CY, HERO_LABEL_Y, RING_STATUS_Y, TITLE_Y
 from .quota import format_countdown_dh, format_countdown_hm
 
 COLOR_BG = QColor(20, 22, 27, 215)
@@ -18,8 +18,8 @@ COLOR_GREEN = QColor(74, 200, 126)
 COLOR_YELLOW = QColor(240, 181, 60)
 COLOR_RED = QColor(237, 90, 82)
 COLOR_GRAY = QColor(148, 153, 162)
-COLOR_TIMER = QColor(200, 205, 215, 170)  # 倒计时外环中性色，不占绿黄红语义
-CARD_TIMER_RING_WIDTH = 4.0
+COLOR_TIMER = QColor(200, 205, 215, 120)  # 倒计时外环中性色，不占绿黄红语义
+CARD_TIMER_RING_WIDTH = 2.5
 
 
 CARD_FONT_CACHE = {}
@@ -78,7 +78,7 @@ def hero_font_size(value, available, base_pt):
 
 
 def draw_double_ring(p, cx, cy, r_inner, r_outer, w_inner, remaining,
-                     timer_ratio, color, outer_opacity):
+                     timer_ratio, color, outer_opacity, text_pt=9.0):
     """同心双环：内环=剩余额度（弧长恒定，阈值色），外环=倒计时（中性色，
     透明度=outer_opacity 淡入）。timer_ratio 为距重置的剩余比例
     （None=只画轨道，不伪装成有效倒计时）。"""
@@ -90,28 +90,28 @@ def draw_double_ring(p, cx, cy, r_inner, r_outer, w_inner, remaining,
         p.setOpacity(p.opacity() * outer_opacity)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(QPen(COLOR_TRACK, CARD_TIMER_RING_WIDTH,
-                      Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+                      Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.drawEllipse(rect_o)
         if timer_ratio is not None:
             span = int(360 * 16 * max(0.0, min(1.0, timer_ratio)))
             if span > 0:
                 p.setPen(QPen(COLOR_TIMER, CARD_TIMER_RING_WIDTH,
-                              Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+                              Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 p.drawArc(rect_o, 90 * 16, -span)
         p.restore()
 
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.setPen(QPen(COLOR_TRACK, w_inner, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+    p.setPen(QPen(COLOR_TRACK, w_inner, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
     p.drawEllipse(rect_i)
     if remaining is not None:
         arc = int(360 * 16 * max(0.0, min(100.0, remaining)) / 100.0)
         if arc > 0:
-            p.setPen(QPen(color, w_inner, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            p.setPen(QPen(color, w_inner, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawArc(rect_i, 90 * 16, -arc)
 
     text = f"{remaining:.0f}%" if remaining is not None else "—"
     hole = 2 * (r_inner - w_inner / 2.0) - 4
-    p.setFont(center_font(text, hole, 9.0))
+    p.setFont(center_font(text, hole, text_pt))
     p.setPen(QPen(color if remaining is not None else COLOR_GRAY))
     p.drawText(rect_i, Qt.AlignmentFlag.AlignCenter, text)
 
@@ -154,28 +154,32 @@ def service_status(service):
     return ""
 
 
-def _hero(p, rect, metric, center_y, now, ring_color, mini=False):
+def _hero(p, rect, metric, center_y, now, ring_color, mini=False, text_color=COLOR_TEXT):
     if metric and metric.remaining is not None:
         ratio = None
         if metric.reset is not None and metric.window_seconds:
             ratio = (metric.reset - now).total_seconds() / metric.window_seconds
         draw_double_ring(p, rect.center().x(), rect.y() + center_y,
-                         16.0 if mini else 18.0, 23.0, 5.0, metric.remaining,
-                         ratio, ring_color, 1.0 if mini and ratio is not None else 0.0)
+                         16.0 if mini else 21.5, 23.0, 5.0, metric.remaining,
+                         ratio, ring_color, 1.0 if mini and ratio is not None else 0.0,
+                         text_pt=9.0 if mini else 10.0)
     else:
         value = metric_text(metric, now) if metric else "—"
         available = rect.width() - 16
         size = hero_font_size(value, available, 15.0 if mini else 18.0)
         _text(p, QRectF(rect.x() + 8, rect.y() + center_y - 18, available, 36),
-              value, size=size, bold=True, color=COLOR_TEXT)
+              value, size=size, bold=True, color=text_color)
 
 
 def _detail(p, rect, y, metric, now):
     x, width = rect.x() + 12, rect.width() - 24
     value = metric_text(metric, now)
+    label = metric.label
+    if metric.remaining is not None and metric.reset is not None:
+        label = f"{label} · {format_countdown_dh(metric.reset, now)}"
     p.setFont(_card_font(8))
     value_width = min(width * 0.56, p.fontMetrics().horizontalAdvance(value) + 3)
-    _text(p, QRectF(x, rect.y() + y, width - value_width - 6, 13), metric.label,
+    _text(p, QRectF(x, rect.y() + y, width - value_width - 6, 13), label,
           alignment=Qt.AlignmentFlag.AlignLeft)
     _text(p, QRectF(x + width - value_width, rect.y() + y, value_width, 13), value,
           alignment=Qt.AlignmentFlag.AlignRight, color=COLOR_TEXT)
@@ -189,9 +193,6 @@ def _detail(p, rect, y, metric, now):
             fill = QRectF(track)
             fill.setWidth(track.width() * metric.remaining / 100)
             p.drawRoundedRect(fill, 2, 2)
-        if metric.reset is not None:
-            _text(p, QRectF(x, rect.y() + y + 20, width, 13),
-                  format_countdown_dh(metric.reset, now), size=7.5)
 
 
 def mini_caption(hero, status, label):
@@ -200,24 +201,27 @@ def mini_caption(hero, status, label):
 
 
 def draw_service(p, rect, service, now, ring_color, mini=False, offline=False):
-    _chrome(p, rect.adjusted(3, 3, -3, -3) if mini else rect)
+    if not mini:
+        _chrome(p, rect)
     # 迷你卡上服务名只是定位提示，用次级色弱化；展开面板仍是主色。
     _line(p, rect, TITLE_Y, service.name, size=9, bold=True,
           color=COLOR_SUBTLE if mini else COLOR_TEXT)
     status = "数据陈旧" if offline else service_status(service)
+    muted = bool(offline or service.error or service.stale or service.unavailable)
+    text_color = COLOR_GRAY if muted else COLOR_TEXT
     hero = service.hero
     five_hour_ring = bool(hero and hero.remaining is not None and (
         hero.window_seconds == 18000 or re.match(r"^\s*5\s*(?:小时|h(?:ours?|rs?)?(?![a-z]))", hero.label, re.I)
     ))
     label = hero.label if hero and not five_hour_ring else ""
     if mini:
-        _hero(p, rect, hero, 57, now, ring_color, mini=True)
+        _hero(p, rect, hero, 57, now, ring_color, mini=True, text_color=text_color)
         caption, caption_y = mini_caption(hero, status, label)
         if caption:
             _text(p, QRectF(rect.x() + 10, rect.y() + caption_y, rect.width() - 20, 11),
                   caption, size=7)
         return
-    _hero(p, rect, hero, HERO_CY, now, ring_color)
+    _hero(p, rect, hero, HERO_CY, now, ring_color, text_color=text_color)
     if hero and hero.remaining is not None and hero.reset is not None and not status:
         formatter = format_countdown_hm if five_hour_ring else format_countdown_dh
         status = formatter(hero.reset, now)
@@ -234,8 +238,10 @@ def draw_service(p, rect, service, now, ring_color, mini=False, offline=False):
             _line(p, rect, HERO_LABEL_Y, label)
     if status:
         _line(p, rect, RING_STATUS_Y, status)
-    for y, metric in zip(DETAIL_ROWS, service.details):
+    y = DETAIL_START_Y
+    for metric in service.details:
         _detail(p, rect, y, metric, now)
+        y += DETAIL_STEP_BAR if metric.remaining is not None else DETAIL_STEP_TEXT
 
 
 def draw_empty(p, rect, text):

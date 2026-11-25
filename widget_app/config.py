@@ -42,6 +42,7 @@ DEFAULTS = {
     "window_y": None,
     "snap_edge": "",        # 贴边收起："" | top | bottom | left | right
     "blink_enabled": True,  # 低额度（5h 剩余 <10%）时收起卡闪烁提醒
+    "background_opacity": 100,  # 背景不透明度档位（70–100）
     "allow_insecure_http": False,  # 非回环 HTTP 需用户显式允许（明文传输）
     "service_preferences": {},
     "legacy_service_scope": "",
@@ -139,6 +140,9 @@ def load_config() -> dict:
             cfg[key] = DEFAULTS[key]
     if not isinstance(cfg.get("allow_insecure_http"), bool):
         cfg["allow_insecure_http"] = False
+    opacity = cfg.get("background_opacity")
+    if type(opacity) is not int or not 70 <= opacity <= 100:
+        cfg["background_opacity"] = 100
     if "service_preferences" not in raw and isinstance(raw.get("username"), str) and raw["username"]:
         cfg["legacy_service_scope"] = credential_scope(cfg["server_url"], raw["username"])
     cfg["service_preferences"] = _clean_preferences(cfg["service_preferences"])

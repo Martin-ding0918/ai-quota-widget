@@ -6,7 +6,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime, timezone
-from PySide6.QtCore import QEasingCurve, QEvent, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QLineF, QRect, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QCursor, QPainter, QPainterPath
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QWidget
 
@@ -52,6 +52,7 @@ class QuotaWidget(QWidget):
         self._active = set()
         self._last_error = ""
         self._credential_warning = ""
+        self._last_update_at = None
         self._fetch_inflight = False
         self._manual_pending = False
         self._snapshot_loaded = False
@@ -120,6 +121,7 @@ class QuotaWidget(QWidget):
             self._manual_pending |= manual
             return
         self._fetch_inflight = True
+        self.update()
         client = self._client
         panel, _ = self._selection()
         targets = [i for i in panel if manual or i in self._active]
@@ -142,6 +144,7 @@ class QuotaWidget(QWidget):
         before = self._selection()
         self._services = merge_services(result, self._services)
         self._last_error = ""
+        self._last_update_at = datetime.now(timezone.utc).astimezone()
         self._snapshot_loaded = True
         scope = self._scope()
         if result and self._cfg["legacy_service_scope"] == scope:
@@ -322,14 +325,26 @@ class QuotaWidget(QWidget):
         bounds = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         path = QPainterPath()
         path.addRoundedRect(bounds, 12, 12)
-        painter.fillPath(path, cards.COLOR_BG)
+        background = QColor(cards.COLOR_BG)
+        opacity = self._cfg.get("background_opacity", 100)
+        background.setAlpha(max(0, min(255, int(cards.COLOR_BG.alpha() * opacity / 100))))
+        painter.fillPath(path, background)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QColor(255, 255, 255, 28))
+        painter.drawPath(path)
         painter.setClipPath(path)
         panel, mini = self._selection()
         now = datetime.now(timezone.utc).astimezone()
-        if self._t < 0.999:
-            self._paint_layer(painter, self._grid(False, self._geo()), panel, now, False, 1 - self._t)
-        if self._t > 0.001:
-            self._paint_layer(painter, self._grid(True, self._geo()), mini, now, True, self._t)
+        old_alpha = max(0.0, 1.0 - self._t / 0.4)
+        new_alpha = max(0.0, (self._t - 0.4) / 0.6)
+        if old_alpha > 0.001:
+            self._paint_layer(painter, self._grid(False, self._geo()), panel, now, False, old_alpha)
+        if new_alpha > 0.001:
+            self._paint_layer(painter, self._grid(True, self._geo()), mini, now, True, new_alpha)
+        if self._fetch_inflight:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(120, 200, 255, 190))
+            painter.drawEllipse(QRectF(self.width() - 12, 6, 4, 4))
 
     def _paint_layer(self, painter, grid, ids, now, mini, alpha):
         painter.save()
@@ -347,6 +362,15 @@ class QuotaWidget(QWidget):
                 service = self._services[service_id]
                 cards.draw_service(painter, QRectF(cell.x, top, cell.width, cell.height), service, now,
                                    self._ring_color(service), mini=mini, offline=bool(self._last_error))
+        if mini and len(ids) > 1:
+            first, second = grid.cards[0], grid.cards[1]
+            painter.setPen(QColor(255, 255, 255, 32))
+            if second.x > first.x:
+                x = second.x
+                painter.drawLine(QLineF(x + 0.5, 14, x + 0.5, grid.height - 14))
+            else:
+                y = second.y
+                painter.drawLine(QLineF(14, y + 0.5, grid.width - 14, y + 0.5))
         if not mini and grid.max_scroll:
             track_height = grid.height - 16
             thumb_height = max(18, track_height * grid.height / grid.content_height)
@@ -424,6 +448,13 @@ class QuotaWidget(QWidget):
         menu = QMenu(self)
         self._menu = menu
         menu.installEventFilter(self)
+        if self._last_update_at is None:
+            info = menu.addAction("尚未取得数据")
+        else:
+            mode = "活动档 1 分钟" if self._active else "缓存档 3 分钟"
+            info = menu.addAction(f"已更新于 {self._last_update_at:%H:%M} · {mode}")
+        info.setEnabled(False)
+        menu.addSeparator()
         menu.addAction("立即刷新", lambda: self.refresh(manual=True))
         menu.addAction("取消贴边" if self._snap_edge else "贴边收起", self._toggle_snap)
         for label, checked, handler in (
@@ -434,6 +465,12 @@ class QuotaWidget(QWidget):
             action.setCheckable(True)
             action.setChecked(checked)
             action.triggered.connect(handler)
+        opacity = menu.addMenu("背景不透明度")
+        for value in (100, 95, 85, 70):
+            action = opacity.addAction(f"{value}%")
+            action.setCheckable(True)
+            action.setChecked(self._cfg.get("background_opacity", 100) == value)
+            action.triggered.connect(lambda _checked, v=value: self._set_opacity(v))
         menu.addAction("设置…", lambda: QTimer.singleShot(0, self.show_settings))
         if self._error_details():
             menu.addAction("错误详情…", lambda: QTimer.singleShot(0, self.show_errors))
@@ -509,6 +546,11 @@ class QuotaWidget(QWidget):
             self._settle_floating(geo)
         else:
             self._snap(nearest_edge(_rect(self.frameGeometry()), geo), geo)
+
+    def _set_opacity(self, value):
+        self._cfg["background_opacity"] = value
+        self._persist()
+        self.update()
 
     def _toggle_blink(self, checked):
         self._blink_enabled = checked
@@ -599,6 +641,7 @@ class QuotaWidget(QWidget):
                 self._services = {}
                 self._snapshot_loaded = False
                 self._last_error = ""
+                self._last_update_at = None
             self.refresh()
         else:
             panel, _ = self._selection()

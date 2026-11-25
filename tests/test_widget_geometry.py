@@ -307,7 +307,7 @@ class TestWidget(unittest.TestCase):
         with patch.object(config, "save_config") as save:
             self.widget.contextMenuEvent(event)
             menu = self.widget._menu
-            cancel = menu.actions()[1]
+            cancel = next(a for a in menu.actions() if a.text() in ("取消贴边", "贴边收起"))
             target = menu.actionGeometry(cancel).center()
             QTest.mouseClick(menu, Qt.MouseButton.RightButton, pos=target)
             self.assertEqual(self.widget._snap_edge, "right")
@@ -315,6 +315,24 @@ class TestWidget(unittest.TestCase):
             QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=target)
             self.assertEqual(self.widget._snap_edge, "")
             self.assertEqual(save.call_args.args[0]["snap_edge"], "")
+
+    def test_menu_shows_update_state_and_sets_opacity(self):
+        from datetime import datetime, timezone
+        self.widget._last_update_at = datetime.now(timezone.utc).astimezone()
+        self.widget._active = {1}
+        pos = QPoint(10, 10)
+        event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, pos, self.widget.mapToGlobal(pos))
+        with patch.object(config, "save_config") as save:
+            self.widget.contextMenuEvent(event)
+            menu = self.widget._menu
+            info = next(a for a in menu.actions() if a.text().startswith("已更新于"))
+            self.assertIn("活动档 1 分钟", info.text())
+            self.assertFalse(info.isEnabled())
+            opacity_menu = next(a.menu() for a in menu.actions() if a.text() == "背景不透明度")
+            action = next(a for a in opacity_menu.actions() if a.text() == "70%")
+            action.trigger()
+            save.assert_called_once()
+        self.assertEqual(self.widget._cfg["background_opacity"], 70)
 
     def test_drop_at_bottom_prefers_pointer_over_overhanging_side(self):
         from widget_app.layout import Rect
