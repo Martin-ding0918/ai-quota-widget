@@ -320,3 +320,38 @@ class TestWidget(unittest.TestCase):
         from widget_app.layout import Rect
         self.widget.setGeometry(-100, 645, 176, 190)
         self.assertEqual(self.widget._nearest_edge(Rect(0, 0, 1000, 800), QPoint(20, 799)), "bottom")
+
+    def test_open_dashboard_rejects_invalid_scheme(self):
+        self.widget._cfg["server_url"] = "file:///C:/Windows/System32/calc.exe"
+        with patch("widget_app.widget.webbrowser.open") as open_browser, \
+                patch("widget_app.widget.QMessageBox.warning") as warning:
+            self.widget._open_dashboard()
+            open_browser.assert_not_called()
+            warning.assert_called_once()
+        self.widget._cfg["server_url"] = "https://openusage.example.com"
+        with patch("widget_app.widget.webbrowser.open") as open_browser:
+            self.widget._open_dashboard()
+            open_browser.assert_called_once_with("https://openusage.example.com")
+
+    def test_save_settings_caps_mini_ids_at_two_with_offline_services(self):
+        self.widget._cfg["username"] = "test"
+        scope = self.widget._scope()
+        self.widget._cfg["service_preferences"][scope] = {"panel_ids": [1, 2, 99], "mini_ids": [1, 99]}
+        self.widget._services = {1: Service(1, "S1", "opencode"), 2: Service(2, "S2", "opencode")}
+        self.widget.show_settings()
+        dialog = self.widget._settings_dialog
+        dialog.mini_b.setCurrentIndex(dialog.mini_b.findData(2))
+        with patch.object(config, "save_config") as save:
+            self.widget._save_settings()
+            saved = save.call_args.args[0]["service_preferences"][scope]["mini_ids"]
+            self.assertEqual(saved, [1, 2])
+
+    def test_geo_and_dialogs_tolerate_missing_screen(self):
+        with patch("widget_app.widget.QApplication.screenAt", return_value=None), \
+                patch.object(self.widget, "screen", return_value=None), \
+                patch("widget_app.widget.QApplication.primaryScreen", return_value=None):
+            geo = self.widget._geo()
+            self.assertGreater(geo.width, 0)
+            self.widget.show_errors()
+            self.assertIsNotNone(self.widget._error_dialog)
+            self.widget._error_dialog.close()

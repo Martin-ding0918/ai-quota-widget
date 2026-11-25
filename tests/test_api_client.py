@@ -79,6 +79,27 @@ class TestLogin(unittest.TestCase):
         for call in sess.calls:
             self.assertIs(call["allow_redirects"], False, f"{call['url']} 未禁用重定向")
 
+    def test_login_and_health_omit_stale_bearer_header(self):
+        client, sess = make_client(
+            [FakeResponse(200, {"status": "ok"}), FakeResponse(200, {"token": NEW_TOKEN})],
+            token=TOKEN,
+        )
+        self.assertTrue(client.health())
+        client.login()
+        self.assertNotIn("Authorization", sess.calls[0]["headers"])
+        self.assertNotIn("Authorization", sess.calls[1]["headers"])
+
+    def test_close_closes_underlying_session(self):
+        closed = []
+
+        class ClosableSession(FakeSession):
+            def close(self):
+                closed.append(True)
+
+        client = OpenUsageClient("http://test", "u", "p", session=ClosableSession([]))
+        client.close()
+        self.assertEqual(closed, [True])
+
     def test_login_invalid_credentials_detail(self):
         client, _ = make_client([FakeResponse(401, {"detail": "用户名或密码错误"})])
         with self.assertRaises(AuthError) as ctx:

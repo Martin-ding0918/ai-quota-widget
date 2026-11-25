@@ -203,9 +203,16 @@ class QuotaWidget(QWidget):
                 self._manual_pending = False
                 self.refresh(manual=True)
 
+    def _active_screen(self):
+        return (QApplication.screenAt(self.frameGeometry().center())
+                or self.screen()
+                or QApplication.primaryScreen())
+
     def _geo(self):
         screen = QApplication.screenAt(QCursor.pos()) if self._dragging else None
-        screen = screen or QApplication.screenAt(self.frameGeometry().center()) or self.screen()
+        screen = screen or self._active_screen()
+        if screen is None:
+            return Rect(0, 0, 1920, 1080)
         return _rect(screen.availableGeometry())
 
     def _grid(self, mini, geo):
@@ -430,7 +437,7 @@ class QuotaWidget(QWidget):
         menu.addAction("设置…", lambda: QTimer.singleShot(0, self.show_settings))
         if self._error_details():
             menu.addAction("错误详情…", lambda: QTimer.singleShot(0, self.show_errors))
-        menu.addAction("打开 OpenUsage 面板", lambda: webbrowser.open(self._cfg["server_url"]))
+        menu.addAction("打开 OpenUsage 面板", self._open_dashboard)
         menu.addSeparator()
         menu.addAction("退出", QApplication.quit)
 
@@ -457,6 +464,15 @@ class QuotaWidget(QWidget):
                 details.append(f"{service.name}（#{service_id}）：{status}")
         return "\n".join(details)
 
+    def _open_dashboard(self):
+        url = (self._cfg.get("server_url") or "").strip()
+        if config.http_security(url) == "invalid":
+            QMessageBox.warning(self, "打开面板", "服务器地址无效，请在设置中检查。")
+            return
+        if "://" not in url:
+            url = "http://" + url
+        webbrowser.open(url)
+
     def show_errors(self):
         if self._error_dialog is None:
             dialog = QMessageBox(QMessageBox.Icon.Information, "AI 用量悬浮窗 — 错误详情", "",
@@ -477,7 +493,9 @@ class QuotaWidget(QWidget):
         dialog = self._error_dialog
         dialog.setText(self._error_details() or "暂无错误详情。")
         dialog.adjustSize()
-        dialog.move(self.screen().availableGeometry().center() - dialog.rect().center())
+        screen = self._active_screen()
+        if screen is not None:
+            dialog.move(screen.availableGeometry().center() - dialog.rect().center())
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -519,7 +537,9 @@ class QuotaWidget(QWidget):
             dialog.deleteLater()
 
         dialog.finished.connect(close)
-        dialog.move(self.screen().availableGeometry().center() - dialog.rect().center())
+        screen = self._active_screen()
+        if screen is not None:
+            dialog.move(screen.availableGeometry().center() - dialog.rect().center())
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -550,7 +570,11 @@ class QuotaWidget(QWidget):
             previous = cfg["service_preferences"].get(scope, {})
             selected = dialog.preferences()
             for key in ("panel_ids", "mini_ids"):
-                selected[key].extend(i for i in previous.get(key, []) if i not in self._services)
+                selected[key].extend(
+                    i for i in previous.get(key, [])
+                    if i not in self._services and i not in selected[key]
+                )
+            selected["mini_ids"] = selected["mini_ids"][:2]
             cfg["service_preferences"] = {**cfg["service_preferences"], scope: selected}
         try:
             if password:
@@ -561,7 +585,9 @@ class QuotaWidget(QWidget):
             return
         self._cfg = cfg
         if changed or password:
+            old_client = self._client
             self._client = self._make_client()
+            old_client.close()
             self._fetch_inflight = self._manual_pending = False
             self._credential_warning = ""
             self._signatures.clear()
@@ -585,6 +611,10 @@ class QuotaWidget(QWidget):
         self._cfg.update(window_x=self.x() if x is None else x,
                          window_y=self.y() if y is None else y, snap_edge=self._snap_edge)
         self._persist()
+
+    def closeEvent(self, event):
+        self._client.close()
+        super().closeEvent(event)
 
     def _persist(self):
         try:

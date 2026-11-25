@@ -65,10 +65,17 @@ class OpenUsageClient:
     def token(self) -> str:
         return self._token
 
+    def close(self) -> None:
+        close = getattr(self._session, "close", None)
+        if callable(close):
+            close()
+
     # ---- 内部 ----
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
-        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+    def _request(
+        self, method: str, path: str, *, include_auth: bool = True, **kwargs: Any
+    ) -> requests.Response:
+        headers = {"Authorization": f"Bearer {self._token}"} if (include_auth and self._token) else {}
         # 阻止跟随重定向：登录等请求若被跨源重定向，凭据/token 会被带到第三方
         kwargs.setdefault("allow_redirects", False)
         try:
@@ -86,6 +93,7 @@ class OpenUsageClient:
             raise AuthError("缺少用户名或密码，无法登录")
         resp = self._request(
             "POST", "/api/auth/login",
+            include_auth=False,
             json={"username": self.username, "password": self.password},
         )
         if resp.status_code == 200:
@@ -144,7 +152,7 @@ class OpenUsageClient:
     def health(self) -> bool:
         """免登录连通性探测；连不上或非 200 都算不健康。"""
         try:
-            resp = self._request("GET", "/api/health")
+            resp = self._request("GET", "/api/health", include_auth=False)
         except NetworkError:
             return False
         return resp.status_code == 200
