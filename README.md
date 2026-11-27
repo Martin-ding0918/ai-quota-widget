@@ -51,6 +51,10 @@ Windows 桌面常驻小组件：始终置顶，展示所选服务的额度、余
 > 传输安全：非回环地址的 HTTP 连接需要在设置中显式允许（密码和 token 明文传输），
 > 建议通过反向代理为 OpenUsage 启用 HTTPS。
 
+> Antigravity：先在 OpenUsage 中添加 Google Antigravity 服务（Google OAuth PKCE，
+> 或导入 refresh token/凭据 JSON）；悬浮窗只读取 `/api/usage` 的额度池，不接触
+> Google 凭据。
+
 ## 安装
 
 **方式一：下载可执行文件**（免 Python 环境）
