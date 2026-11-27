@@ -137,6 +137,66 @@ class TestServices(unittest.TestCase):
         self.assertEqual(poll_step(old[45].signature, new[45].signature, False, 0), (True, 0))
         self.assertEqual(poll_step(old[12].signature, new[12].signature, False, 0), (False, 0))
 
+    def test_antigravity_picks_tightest_5h_hero_other_5h_and_tightest_weekly(self):
+        ag = parse_services([row(70, "antigravity", "Antigravity", {
+            "plan": "Google AI Pro",
+            "limits": [
+                {"id": "gemini-5h", "group": "gemini", "group_name": "Gemini Models", "window": "5h",
+                 "percent_used": 0.0, "percent_remaining": 100.0, "resets_at": None},
+                {"id": "gemini-weekly", "group": "gemini", "group_name": "Gemini Models", "window": "weekly",
+                 "percent_used": 15.0, "percent_remaining": 85.0, "resets_at": "2026-12-02T00:00:00Z"},
+                {"id": "3p-5h", "group": "claude_gpt", "group_name": "Claude and GPT models", "window": "5h",
+                 "percent_used": 60.0, "percent_remaining": 40.0, "resets_at": "2026-11-26T20:00:00Z"},
+                {"id": "3p-weekly", "group": "claude_gpt", "group_name": "Claude and GPT models", "window": "weekly",
+                 "percent_used": 50.5, "percent_remaining": 49.5, "resets_at": "2026-12-01T13:10:00Z"},
+                {"id": "gemini-argon-wtu-weekly", "group": "argon", "group_name": "Gemini 4 Argon", "window": "weekly",
+                 "percent_used": 100.0, "percent_remaining": 0.0, "resets_at": "2026-12-01T18:33:00Z"},
+            ],
+        })])[70]
+        self.assertEqual(ag.hero.label, "Claude 5h")
+        self.assertEqual(ag.hero.remaining, 40.0)
+        self.assertEqual(ag.hero.window_seconds, 18000)
+        self.assertEqual(ag.hero.reset.hour, 20)
+        self.assertEqual([d.label for d in ag.details], ["Gemini 5h", "Argon 周"])
+        self.assertEqual([d.remaining for d in ag.details], [100.0, 0.0])
+        self.assertIsNone(ag.details[0].reset)
+        self.assertEqual(ag.details[1].reset.day, 1)
+
+    def test_antigravity_groups_fallback_and_untouched_tiebreak(self):
+        ag = parse_services([row(71, "antigravity", "AG", {
+            "groups": [
+                {"id": "gemini", "name": "Gemini Models", "buckets": [
+                    {"id": "gemini-5h", "window": "5h", "percent_used": 0.0, "resets_at": None},
+                    {"id": "gemini-weekly", "window": "weekly", "percent_used": 0.0, "resets_at": None},
+                ]},
+                {"id": "claude_gpt", "name": "Claude and GPT models", "buckets": [
+                    {"id": "3p-5h", "window": "5h", "percent_used": 0.0, "resets_at": None},
+                    {"id": "3p-weekly", "window": "weekly", "percent_used": 0.0, "resets_at": None},
+                ]},
+            ],
+        })])[71]
+        self.assertEqual(ag.hero.label, "Gemini 5h")
+        self.assertEqual(ag.hero.remaining, 100.0)
+        self.assertIsNone(ag.hero.reset)
+        self.assertEqual([d.label for d in ag.details], ["Claude 5h", "Gemini 周"])
+
+    def test_antigravity_weekly_only_and_empty_payload(self):
+        weekly_only = parse_services([row(72, "antigravity", "AG Weekly", {
+            "limits": [
+                {"id": "gemini-argon-wtu-weekly", "group": "argon", "window": "weekly", "percent_used": 80.0},
+                {"id": "gemini-weekly", "group": "gemini", "window": "weekly", "percent_used": 20.0},
+            ],
+        })])[72]
+        self.assertEqual(weekly_only.hero.label, "Argon 周")
+        self.assertEqual(weekly_only.hero.remaining, 20.0)
+        self.assertEqual(weekly_only.hero.window_seconds, 604800)
+        self.assertEqual(len(weekly_only.details), 1)
+        self.assertEqual(weekly_only.details[0].label, "Gemini 周")
+
+        empty = parse_services([row(73, "antigravity", "AG Empty", {"limits": []})])[73]
+        self.assertIsNone(empty.hero)
+        self.assertEqual(empty.details, ())
+
 
 class TestPreferences(unittest.TestCase):
     def test_upgrade_marker_survives_save_until_first_successful_migration(self):

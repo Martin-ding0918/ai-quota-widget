@@ -101,9 +101,101 @@ def _gemini_label(row):
     return {"session": "会话额度", "weekly": "每周"}.get(raw.lower(), raw or "额度")
 
 
+def _antigravity_short_group(group_id, group_name):
+    short = {"gemini": "Gemini", "claude_gpt": "Claude", "argon": "Argon"}.get(group_id)
+    if short:
+        return short
+    cleaned = str(group_name or group_id or "").strip()
+    for suffix in (" models", " Models"):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)].strip()
+    return cleaned or "额度"
+
+
+def _antigravity_metrics(data):
+    raw_limits = _array(data.get("limits"))
+    if not raw_limits:
+        raw_limits = []
+        for raw_group in _array(data.get("groups")):
+            group = _object(raw_group)
+            gid = str(group.get("id") or "").strip().lower()
+            gname = str(group.get("name") or gid).strip()
+            for raw_bucket in _array(group.get("buckets")):
+                bucket = _object(raw_bucket)
+                if bucket:
+                    raw_limits.append({**bucket, "group": gid, "group_name": gname})
+
+    entries = []
+    for idx, raw in enumerate(raw_limits):
+        row = _object(raw)
+        if not row:
+            continue
+        rem_dec = _decimal(row.get("percent_remaining"))
+        if rem_dec is not None:
+            remaining = float(max(0, min(100, rem_dec)))
+        else:
+            remaining = _opencode_remaining(row.get("percent_used"))
+        if remaining is None:
+            continue
+
+        window_raw = str(row.get("window") or "").strip().lower()
+        bid = str(row.get("id") or "").strip().lower()
+        if window_raw in ("5h", "session", "five_hour") or bid.endswith("-5h"):
+            window, window_seconds, win_suffix = "5h", 18000, "5h"
+        elif window_raw in ("weekly", "week", "7d") or "weekly" in bid:
+            window, window_seconds, win_suffix = "weekly", 604800, "周"
+        else:
+            window, window_seconds, win_suffix = window_raw or "other", None, str(row.get("label") or "").strip()
+
+        group_id = str(row.get("group") or "").strip().lower()
+        if not group_id:
+            if "argon" in bid:
+                group_id = "argon"
+            elif bid.startswith("3p"):
+                group_id = "claude_gpt"
+            elif bid.startswith("gemini"):
+                group_id = "gemini"
+        group_label = _antigravity_short_group(group_id, row.get("group_name"))
+        label = f"{group_label} {win_suffix}".strip() if win_suffix and win_suffix != group_label else group_label
+        metric = Metric(label, remaining=remaining, reset=parse_reset_datetime(row.get("resets_at")),
+                        window_seconds=window_seconds)
+        entries.append((idx, window, remaining, metric))
+
+    if not entries:
+        return []
+
+    five_hours = [e for e in entries if e[1] == "5h"]
+    hero_entry = min(five_hours or entries, key=lambda e: (e[2], e[0]))
+    chosen = [hero_entry]
+    chosen_ids = {hero_entry[0]}
+
+    # Slot 1: another 5h pool if present (e.g. Claude 5h alongside Gemini 5h).
+    other_5h = [e for e in five_hours if e[0] not in chosen_ids]
+    if other_5h:
+        pick = min(other_5h, key=lambda e: (e[2], e[0]))
+        chosen.append(pick)
+        chosen_ids.add(pick[0])
+
+    # Slot 2: tightest weekly pool (e.g. Argon / Claude / Gemini weekly).
+    weeklies = [e for e in entries if e[1] == "weekly" and e[0] not in chosen_ids]
+    if weeklies:
+        pick = min(weeklies, key=lambda e: (e[2], e[0]))
+        chosen.append(pick)
+        chosen_ids.add(pick[0])
+
+    # Backfill up to 3 metrics if fewer than 2 detail slots were populated.
+    if len(chosen) < 3:
+        rest = sorted((e for e in entries if e[0] not in chosen_ids), key=lambda e: (e[2], e[0]))
+        chosen.extend(rest[: 3 - len(chosen)])
+
+    return [e[3] for e in chosen[:3]]
+
+
 def _provider_metrics(kind, data):
     if kind == "custom":
         return list(_custom_metrics(data))
+    if kind == "antigravity":
+        return _antigravity_metrics(data)
     if kind in ("claude", "chatgpt"):
         return [m for key, label, duration in (
             ("five_hour", "5 小时", 18000), ("seven_day", "7 天", 604800)

@@ -210,10 +210,11 @@ def draw_service(p, rect, service, now, ring_color, mini=False, offline=False):
     muted = bool(offline or service.error or service.stale or service.unavailable)
     text_color = COLOR_GRAY if muted else COLOR_TEXT
     hero = service.hero
+    starts_with_5h = bool(hero and re.match(r"^\s*5\s*(?:小时|h(?:ours?|rs?)?(?![a-z]))", hero.label, re.I))
     five_hour_ring = bool(hero and hero.remaining is not None and (
-        hero.window_seconds == 18000 or re.match(r"^\s*5\s*(?:小时|h(?:ours?|rs?)?(?![a-z]))", hero.label, re.I)
+        hero.window_seconds == 18000 or starts_with_5h
     ))
-    label = hero.label if hero and not five_hour_ring else ""
+    label = hero.label if hero and not starts_with_5h else ""
     if mini:
         _hero(p, rect, hero, 57, now, ring_color, mini=True, text_color=text_color)
         caption, caption_y = mini_caption(hero, status, label)
