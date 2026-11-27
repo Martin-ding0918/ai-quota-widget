@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from .api_client import ApiError, OpenUsageError
+from .layout import MAX_MINI_CARDS
 from .quota import (
     _decimal, _has_kimi_marker, _opencode_remaining, _parse_kimi_from_service,
     _safe_int, parse_deepseek_quota, parse_opencode_quota, parse_reset_datetime,
@@ -317,6 +318,6 @@ def default_ids(services, legacy=False):
 
 def selected_ids(services, preferences, legacy=False):
     panel = [i for i in preferences.get("panel_ids", default_ids(services, legacy)) if i in services]
-    mini = preferences.get("mini_ids", panel[:2])
-    return panel, [i for i in mini if i in panel][:2]
+    mini = preferences.get("mini_ids", panel[:MAX_MINI_CARDS])
+    return panel, [i for i in mini if i in panel][:MAX_MINI_CARDS]
 

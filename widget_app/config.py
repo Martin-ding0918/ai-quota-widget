@@ -18,6 +18,8 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .layout import MAX_MINI_CARDS
+
 try:
     import keyring
 except Exception:  # pragma: no cover - keyring 不可用时降级为凭据缺失
@@ -168,7 +170,7 @@ def _clean_preferences(value):
             if isinstance(ids, list):
                 entry[key] = list(dict.fromkeys(i for i in ids if type(i) is int and i > 0))
                 if key == "mini_ids":
-                    entry[key] = entry[key][:2]
+                    entry[key] = entry[key][:MAX_MINI_CARDS]
         out[scope] = entry
     return out
 

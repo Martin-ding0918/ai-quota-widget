@@ -44,7 +44,7 @@ class SettingsDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.setWindowTitle("AI 用量悬浮窗 — 设置")
         self.setStyleSheet(SETTINGS_STYLE)
-        self.resize(485, 500)
+        self.resize(485, 530)
         self.scope = credential_scope(cfg["server_url"], cfg["username"])
         self.selection_changed = False
         self.services = services
@@ -94,14 +94,17 @@ class SettingsDialog(QDialog):
         mini_form = QFormLayout()
         self.mini_a = QComboBox()
         self.mini_b = QComboBox()
+        self.mini_c = QComboBox()
         mini_form.addRow("迷你卡第 1 项", self.mini_a)
         mini_form.addRow("迷你卡第 2 项", self.mini_b)
+        mini_form.addRow("迷你卡第 3 项", self.mini_c)
         display_layout.addLayout(mini_form)
         tabs.addTab(display, "显示服务")
         self.display = display
         self.items.itemChanged.connect(self._selection_edit)
         self.mini_a.currentIndexChanged.connect(self._mini_edit)
         self.mini_b.currentIndexChanged.connect(self._mini_edit)
+        self.mini_c.currentIndexChanged.connect(self._mini_edit)
         self.server.textChanged.connect(self._check_scope)
         self.user.textChanged.connect(self._check_scope)
         self.allow_insecure.toggled.connect(self._check_scope)
@@ -153,9 +156,11 @@ class SettingsDialog(QDialog):
                 self.insecure_warning.setText(
                     "此地址使用 HTTP，密码和 token 将明文传输；保存前请勾选上面的选项。")
         current = credential_scope(server, user) == self.scope
+        panel_count = len(self._panel_ids())
         self.items.setEnabled(current and bool(self.services))
-        self.mini_a.setEnabled(current and bool(self._panel_ids()))
-        self.mini_b.setEnabled(current and len(self._panel_ids()) > 1)
+        self.mini_a.setEnabled(current and panel_count >= 1)
+        self.mini_b.setEnabled(current and panel_count >= 2)
+        self.mini_c.setEnabled(current and panel_count >= 3 and self.mini_b.currentData() is not None)
         if not current:
             message = "先保存新连接，再为新帐户选择服务。"
         elif not self.services:
@@ -173,24 +178,31 @@ class SettingsDialog(QDialog):
         selected = [i for i in dict.fromkeys(selected) if i in panel]
         first = selected[0] if selected else (panel[0] if panel else None)
         second = selected[1] if len(selected) > 1 else None
-        for index, combo, value in ((0, self.mini_a, first), (1, self.mini_b, second)):
+        third = selected[2] if len(selected) > 2 else None
+        slots = (
+            (0, self.mini_a, first, set()),
+            (1, self.mini_b, second, {first}),
+            (2, self.mini_c, third, {first, second}),
+        )
+        for index, combo, value, excluded in slots:
             with QSignalBlocker(combo):
                 combo.clear()
-                if index == 1 or not panel:
+                if index > 0 or not panel:
                     combo.addItem("不显示", None)
                 for service_id in panel:
-                    if index == 0 or service_id != first:
+                    if service_id not in excluded:
                         combo.addItem(self.services[service_id].name, service_id)
                 combo.setCurrentIndex(max(0, combo.findData(value)))
 
     def _selection_edit(self):
         self.selection_changed = True
-        self._populate_mini((self.mini_a.currentData(), self.mini_b.currentData()))
+        self._populate_mini((self.mini_a.currentData(), self.mini_b.currentData(), self.mini_c.currentData()))
         self._check_scope()
 
     def _mini_edit(self):
         self.selection_changed = True
-        self._populate_mini((self.mini_a.currentData(), self.mini_b.currentData()))
+        self._populate_mini((self.mini_a.currentData(), self.mini_b.currentData(), self.mini_c.currentData()))
+        self._check_scope()
 
     def _move(self, delta):
         row = self.items.currentRow()
@@ -204,6 +216,9 @@ class SettingsDialog(QDialog):
     def preferences(self):
         return {
             "panel_ids": self._panel_ids(),
-            "mini_ids": [i for i in (self.mini_a.currentData(), self.mini_b.currentData()) if i is not None],
+            "mini_ids": [
+                i for i in (self.mini_a.currentData(), self.mini_b.currentData(), self.mini_c.currentData())
+                if i is not None
+            ],
         }
 

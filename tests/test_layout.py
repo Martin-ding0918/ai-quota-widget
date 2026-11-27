@@ -58,6 +58,11 @@ class TestLayout(unittest.TestCase):
             self.assertEqual((single.width, single.height), (cell, cell))
             double = mini_layout(2, vertical)
             self.assertEqual((double.width, double.height), (cell, 2 * cell) if vertical else (2 * cell, cell))
+            triple = mini_layout(3, vertical)
+            self.assertEqual((triple.width, triple.height), (cell, 3 * cell) if vertical else (3 * cell, cell))
+            self.assertEqual(len(triple.cards), 3)
+            capped = mini_layout(4, vertical)
+            self.assertEqual(capped, triple)
 
     def test_edges_clamp_to_negative_origin_screen(self):
         screen = Rect(-1200, 80, 1200, 800)

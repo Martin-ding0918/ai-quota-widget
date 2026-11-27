@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 CARD_W, CARD_H = 160, 176
 CARD_CELL_SIZE = 96
+MAX_MINI_CARDS = 3
 GAP, MARGIN = 8, 8
 TITLE_Y, HERO_CY, HERO_LABEL_Y, STATUS_Y = 7, 51, 76, 90
 RING_STATUS_Y = 78
@@ -54,7 +55,7 @@ def panel_layout(count, vertical, max_width, max_height):
 
 
 def mini_layout(count, vertical):
-    count = max(1, min(count, 2))
+    count = max(1, min(count, MAX_MINI_CARDS))
     size = CARD_CELL_SIZE
     return Grid(size if vertical else count * size, count * size if vertical else size,
                 count * size if vertical else size,

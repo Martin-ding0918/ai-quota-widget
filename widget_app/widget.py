@@ -12,7 +12,9 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QWidget
 
 from . import cards, config
 from .api_client import OpenUsageClient, OpenUsageError
-from .layout import EDGES, VERTICAL_EDGES, Rect, mini_layout, nearest_edge, panel_layout, window_rect
+from .layout import (
+    EDGES, MAX_MINI_CARDS, VERTICAL_EDGES, Rect, mini_layout, nearest_edge, panel_layout, window_rect,
+)
 from .quota import poll_step
 from .services import default_ids, fetch_services, merge_services, selected_ids
 from .settings import SettingsDialog
@@ -150,7 +152,7 @@ class QuotaWidget(QWidget):
         if result and self._cfg["legacy_service_scope"] == scope:
             if scope not in self._cfg["service_preferences"]:
                 ids = default_ids(self._services, legacy=True) or default_ids(self._services)
-                self._cfg["service_preferences"][scope] = {"panel_ids": ids, "mini_ids": ids[:2]}
+                self._cfg["service_preferences"][scope] = {"panel_ids": ids, "mini_ids": ids[:MAX_MINI_CARDS]}
             self._cfg["legacy_service_scope"] = ""
             self._persist()
         panel, mini = self._selection()
@@ -363,14 +365,14 @@ class QuotaWidget(QWidget):
                 cards.draw_service(painter, QRectF(cell.x, top, cell.width, cell.height), service, now,
                                    self._ring_color(service), mini=mini, offline=bool(self._last_error))
         if mini and len(ids) > 1:
-            first, second = grid.cards[0], grid.cards[1]
             painter.setPen(QColor(255, 255, 255, 32))
-            if second.x > first.x:
-                x = second.x
-                painter.drawLine(QLineF(x + 0.5, 14, x + 0.5, grid.height - 14))
-            else:
-                y = second.y
-                painter.drawLine(QLineF(14, y + 0.5, grid.width - 14, y + 0.5))
+            for prev, curr in zip(grid.cards, grid.cards[1:len(ids)]):
+                if curr.x > prev.x:
+                    x = curr.x
+                    painter.drawLine(QLineF(x + 0.5, 14, x + 0.5, grid.height - 14))
+                else:
+                    y = curr.y
+                    painter.drawLine(QLineF(14, y + 0.5, grid.width - 14, y + 0.5))
         if not mini and grid.max_scroll:
             track_height = grid.height - 16
             thumb_height = max(18, track_height * grid.height / grid.content_height)
@@ -616,7 +618,7 @@ class QuotaWidget(QWidget):
                     i for i in previous.get(key, [])
                     if i not in self._services and i not in selected[key]
                 )
-            selected["mini_ids"] = selected["mini_ids"][:2]
+            selected["mini_ids"] = selected["mini_ids"][:MAX_MINI_CARDS]
             cfg["service_preferences"] = {**cfg["service_preferences"], scope: selected}
         try:
             if password:

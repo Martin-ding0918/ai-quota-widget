@@ -351,18 +351,25 @@ class TestWidget(unittest.TestCase):
             self.widget._open_dashboard()
             open_browser.assert_called_once_with("https://openusage.example.com")
 
-    def test_save_settings_caps_mini_ids_at_two_with_offline_services(self):
+    def test_save_settings_caps_mini_ids_at_three_with_offline_services(self):
         self.widget._cfg["username"] = "test"
         scope = self.widget._scope()
-        self.widget._cfg["service_preferences"][scope] = {"panel_ids": [1, 2, 99], "mini_ids": [1, 99]}
-        self.widget._services = {1: Service(1, "S1", "opencode"), 2: Service(2, "S2", "opencode")}
+        self.widget._cfg["service_preferences"][scope] = {
+            "panel_ids": [1, 2, 3, 99],
+            "mini_ids": [1, 2, 99],
+        }
+        self.widget._services = {
+            1: Service(1, "S1", "opencode"),
+            2: Service(2, "S2", "opencode"),
+            3: Service(3, "S3", "antigravity"),
+        }
         self.widget.show_settings()
         dialog = self.widget._settings_dialog
-        dialog.mini_b.setCurrentIndex(dialog.mini_b.findData(2))
+        dialog.mini_c.setCurrentIndex(dialog.mini_c.findData(3))
         with patch.object(config, "save_config") as save:
             self.widget._save_settings()
             saved = save.call_args.args[0]["service_preferences"][scope]["mini_ids"]
-            self.assertEqual(saved, [1, 2])
+            self.assertEqual(saved, [1, 2, 3])
 
     def test_geo_and_dialogs_tolerate_missing_screen(self):
         with patch("widget_app.widget.QApplication.screenAt", return_value=None), \

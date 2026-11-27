@@ -79,13 +79,17 @@ class TestServices(unittest.TestCase):
     def test_defaults_selection_rename_and_temporary_absence(self):
         services = parse_services(self.rows)
         self.assertEqual(default_ids(services, legacy=True), [12, 26, 31])
-        self.assertEqual(selected_ids(services, {}), ([12, 26, 31, 45], [12, 26]))
-        prefs = {"panel_ids": [45, 26, 12], "mini_ids": [26, 45]}
-        self.assertEqual(selected_ids(services, prefs), ([45, 26, 12], [26, 45]))
+        self.assertEqual(selected_ids(services, {}), ([12, 26, 31, 45], [12, 26, 31]))
+        prefs = {"panel_ids": [45, 26, 12, 31], "mini_ids": [26, 45, 31]}
+        self.assertEqual(selected_ids(services, prefs), ([45, 26, 12, 31], [26, 45, 31]))
+        self.assertEqual(
+            selected_ids(services, {"panel_ids": [45, 26, 12, 31], "mini_ids": [26, 45, 31, 12]}),
+            ([45, 26, 12, 31], [26, 45, 31]),
+        )
         services = parse_services([self.rows[0], {**self.rows[3], "name": "改名"}])
         self.assertEqual(selected_ids(services, prefs), ([45, 12], [45]))
         self.assertEqual(services[45].name, "改名")
-        self.assertEqual(prefs["panel_ids"], [45, 26, 12])
+        self.assertEqual(prefs["panel_ids"], [45, 26, 12, 31])
         self.assertEqual(selected_ids(services, {"panel_ids": []}), ([], []))
 
     def test_idle_cached_and_manual_only_for_selected_ids(self):
@@ -213,13 +217,14 @@ class TestPreferences(unittest.TestCase):
                 patch.object(config, "CONFIG_PATH", Path(name) / "config.json"):
             cfg = config.load_config()
             cfg["service_preferences"] = {
-                "https://usage.example|alice": {"panel_ids": [31, 12, 31, False], "mini_ids": [12]},
+                "https://usage.example|alice": {"panel_ids": [31, 12, 31, False], "mini_ids": [12, 31, 45, 99]},
                 "https://usage.example|bob": {"panel_ids": [], "mini_ids": []},
             }
             cfg["token"] = "private"
             config.save_config(cfg)
             actual = config.load_config()
             self.assertEqual(actual["service_preferences"]["https://usage.example|alice"]["panel_ids"], [31, 12])
+            self.assertEqual(actual["service_preferences"]["https://usage.example|alice"]["mini_ids"], [12, 31, 45])
             self.assertEqual(actual["service_preferences"]["https://usage.example|bob"]["panel_ids"], [])
             self.assertNotIn("private", config.CONFIG_PATH.read_text())
 
